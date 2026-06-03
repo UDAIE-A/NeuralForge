@@ -77,7 +77,7 @@ def create_dataloaders(
     seq_len: int = 512,
     batch_size: int = 32,
     stride: int = 256,
-    num_workers: int = 2
+    num_workers: int = 4
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
     Create train and validation dataloaders.
@@ -107,7 +107,9 @@ def create_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=4
     )
     
     val_loader = None

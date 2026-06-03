@@ -54,19 +54,22 @@ class MultiHeadAttention(nn.Module):
         
         # Compute attention scores
         scale = math.sqrt(self.d_head)
-        att = (q @ k.transpose(-2, -1)) * scale
         
-        # Apply causal mask
+        # Use Flash Attention for speed
         T_q = q.shape[2]
         T_k = k.shape[2]
-        # Use the last T_q rows and first T_k columns of the mask
-        att = att.masked_fill(self.mask[:, :, :T_q, :T_k] == 0, float('-inf'))
         
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
+        # Create causal mask for flash attention
+        causal_mask = torch.tril(torch.ones(T_q, T_k, device=x.device, dtype=torch.bool))
         
-        # Apply attention to values
-        out = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        att = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=causal_mask,
+            dropout_p=self.config.dropout if self.training else 0,
+            is_causal=False
+        )
+        
+        out = att.transpose(1, 2).contiguous().view(B, T, C)
         out = self.resid_dropout(self.o_proj(out))
         
         return out, new_cache
