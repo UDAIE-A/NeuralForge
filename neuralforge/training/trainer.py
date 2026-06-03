@@ -274,9 +274,9 @@ class Trainer:
             max_l = max(losses)
             rng = max_l - min_l if max_l > min_l else 1
             print("  Loss trend: ", end="")
+            chars = " .:-=+*#%@"
             for l in losses:
-                h = int(10 * (l - min_l) / rng)
-                chars = " .:-=+*#%@"
+                h = min(int(10 * (l - min_l) / rng), 9)
                 print(chars[h], end="")
             print()
         
