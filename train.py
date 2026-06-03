@@ -75,7 +75,6 @@ def main():
     config.batch_size = args.batch_size
     config.learning_rate = args.lr
     config.device = "cuda"
-    
     print(f"\n{'='*60}")
     print(f"NeuralForge Training")
     print(f"{'='*60}")
@@ -83,9 +82,10 @@ def main():
     print(f"Estimated parameters: {config.num_parameters / 1e6:.2f}M")
     print(f"Vocabulary size: {config.vocab_size}")
     print(f"Sequence length: {config.max_seq_len}")
-    print(f"Batch size: {config.batch_size}")
+    print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {config.learning_rate}")
     print(f"Device: {config.device}")
+    print(f"Epochs: {args.epochs}")
     print(f"{'='*60}\n")
     
     # Train tokenizer
