@@ -66,8 +66,7 @@ def main():
         tokenizer = BPETokenizer.load(tokenizer_path)
         print("  (BPE tokenizer)")
     
-    # Create model
-    config.vocab_size = len(tokenizer)
+    # Create model using config from checkpoint (has correct vocab_size)
     model = NeuralForge(config)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
