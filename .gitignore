@@ -30,6 +30,10 @@ wheels/
 *.pth
 checkpoints/
 
+# Training data (large files)
+data/*.txt
+data/train*.txt
+
 # IDE
 .vscode/
 .idea/

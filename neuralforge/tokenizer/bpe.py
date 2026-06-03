@@ -126,7 +126,9 @@ class BPETokenizer:
             self.merges.append(best_pair)
             
             if verbose and (i + 1) % 100 == 0:
-                print(f"Merge {i+1}/{num_merges}: {best_pair} -> {best_pair[0]+best_pair[1]} (freq: {best_count})")
+                merged = best_pair[0] + best_pair[1]
+                merged = ''.join(c if c.isprintable() else '?' for c in merged)
+                print(f"Merge {i+1}/{num_merges}: {merged} (freq: {best_count})")
         
         # Build vocabulary
         self._build_vocab()
