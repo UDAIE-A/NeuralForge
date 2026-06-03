@@ -352,6 +352,9 @@ class Trainer:
             print("=" * 70)
             
         except KeyboardInterrupt:
+            # Save current progress before exiting
+            self.save_checkpoint(f"epoch_{len(self.epoch_losses)}_interrupted.pt")
+            
             total_time = time.time() - self.train_start_time
             print()
             print()
@@ -361,7 +364,8 @@ class Trainer:
             print(f"  Time:      {format_time(total_time)}")
             print(f"  Steps:     {self.global_step}")
             print(f"  Last loss: {self.epoch_losses[-1]:.4f if self.epoch_losses else 'N/A'}")
-            print(f"  Resume:    python train.py --resume checkpoints/epoch_{len(self.epoch_losses)}.pt")
+            print(f"  Saved:     checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
+            print(f"  Resume:    python train.py --resume checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
             print("=" * 70)
     
     def save_checkpoint(self, filename: str):
