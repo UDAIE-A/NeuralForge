@@ -60,10 +60,13 @@ def main():
                        help='Directory to save checkpoints')
     parser.add_argument('--resume', type=str, default=None,
                        help='Resume from checkpoint')
-    parser.add_argument('--device', type=str, default='cuda',
-                       help='Device to use (cuda/cpu)')
     
     args = parser.parse_args()
+    
+    # GPU check
+    if not torch.cuda.is_available():
+        print("ERROR: CUDA not available. This model requires an NVIDIA GPU for training.")
+        sys.exit(1)
     
     # Get model config
     config = ModelConfig.from_preset(args.preset)
@@ -71,7 +74,7 @@ def main():
     config.max_seq_len = args.seq_len
     config.batch_size = args.batch_size
     config.learning_rate = args.lr
-    config.device = args.device
+    config.device = "cuda"
     
     print(f"\n{'='*60}")
     print(f"NeuralForge Training")

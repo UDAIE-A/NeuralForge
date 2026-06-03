@@ -73,10 +73,12 @@ class Trainer:
         self.save_interval = save_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
         
-        # Setup device
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        # Setup device - GPU only
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available. This model requires a GPU for training.")
+        self.device = torch.device("cuda")
         self.model.to(self.device)
-        print(f"Using device: {self.device}")
+        print(f"Using device: {self.device} ({torch.cuda.get_device_name(0)})")
         
         # Setup optimizer
         self.optimizer = model.get_optimizer(config)

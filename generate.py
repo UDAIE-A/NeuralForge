@@ -34,19 +34,22 @@ def main():
                        help='Top-k sampling')
     parser.add_argument('--interactive', action='store_true',
                        help='Interactive mode')
-    parser.add_argument('--device', type=str, default='cuda',
-                       help='Device to use (cuda/cpu)')
     
     args = parser.parse_args()
     
+    # GPU check
+    if not torch.cuda.is_available():
+        print("ERROR: CUDA not available. This model requires an NVIDIA GPU.")
+        sys.exit(1)
+    
     # Load checkpoint
     print(f"Loading checkpoint: {args.checkpoint}")
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda")
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
     # Get config
     config = checkpoint['config']
-    config.device = str(device)
+    config.device = "cuda"
     
     # Load tokenizer
     tokenizer_path = args.tokenizer or os.path.join(
