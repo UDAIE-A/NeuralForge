@@ -96,13 +96,18 @@ def create_dataloaders(
     """
     train_dataset = TextDataset(train_data, tokenizer, seq_len, stride)
     
+    # Cap batch size to dataset size
+    effective_batch_size = min(batch_size, len(train_dataset))
+    if effective_batch_size < batch_size:
+        print(f"  Warning: batch_size {batch_size} > dataset size {len(train_dataset)}, using {effective_batch_size}")
+    
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=False
     )
     
     val_loader = None
