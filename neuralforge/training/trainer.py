@@ -140,7 +140,38 @@ class Trainer:
         self.epoch_losses: List[float] = []
         self.train_start_time = None
     
-    def _print_header(self, num_epochs: int):
+    def _estimate_time(self, num_epochs: int) -> float:
+        """Run 1 batch to estimate total training time."""
+        print("  Estimating training time...")
+        self.model.train()
+        x, y = next(iter(self.train_loader))
+        x = x.to(self.device)
+        y = y.to(self.device)
+        
+        torch.cuda.synchronize()
+        start = time.time()
+        
+        with torch.amp.autocast('cuda'):
+            logits, loss, _ = self.model(x, targets=y)
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad()
+        
+        torch.cuda.synchronize()
+        batch_time = time.time() - start
+        
+        total_batches = len(self.train_loader) * num_epochs
+        estimated = batch_time * total_batches
+        
+        del logits, loss, x, y
+        torch.cuda.empty_cache()
+        
+        return estimated
+    
+    def _print_header(self, num_epochs: int, estimated_time: float):
         """Print training header."""
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -157,6 +188,7 @@ class Trainer:
         print(f"  Batches:     {len(self.train_loader)} per epoch")
         print(f"  Epochs:      {num_epochs}")
         print(f"  Seq length:  {self.config.max_seq_len}")
+        print(f"  Est. time:   {format_time(estimated_time)}")
         print("=" * 70)
         print()
     
@@ -300,7 +332,8 @@ class Trainer:
     def train(self, num_epochs: int = 10):
         """Full training loop."""
         self.train_start_time = time.time()
-        self._print_header(num_epochs)
+        estimated_time = self._estimate_time(num_epochs)
+        self._print_header(num_epochs, estimated_time)
         
         try:
             for epoch in range(1, num_epochs + 1):
