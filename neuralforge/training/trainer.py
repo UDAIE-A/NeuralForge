@@ -117,6 +117,10 @@ class Trainer:
         self.device = torch.device("cuda")
         self.model.to(self.device)
         
+        # Compile model for faster training
+        print("  Compiling model with torch.compile...")
+        self.model = torch.compile(self.model, mode="reduce-overhead")
+        
         # Setup optimizer
         self.optimizer = model.get_optimizer(config)
         
