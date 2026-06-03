@@ -59,7 +59,8 @@ class MultiHeadAttention(nn.Module):
         # Apply causal mask
         T_q = q.shape[2]
         T_k = k.shape[2]
-        att = att.masked_fill(self.mask[:, :, T_q-T_k:T_q, :T_k] == 0, float('-inf'))
+        # Use the last T_q rows and first T_k columns of the mask
+        att = att.masked_fill(self.mask[:, :, :T_q, :T_k] == 0, float('-inf'))
         
         att = F.softmax(att, dim=-1)
         att = self.attn_dropout(att)
@@ -245,9 +246,12 @@ class NeuralForge(nn.Module):
         kv_caches = None
         
         for _ in range(max_new_tokens):
-            # Crop to max_seq_len if needed
-            idx_cond = idx if idx.size(1) <= self.config.max_seq_len else \
-                       idx[:, -self.config.max_seq_len:]
+            # First step: feed the full prompt; subsequent steps: only last token
+            if kv_caches is None:
+                idx_cond = idx if idx.size(1) <= self.config.max_seq_len else \
+                           idx[:, -self.config.max_seq_len:]
+            else:
+                idx_cond = idx[:, -1:]
             
             # Forward pass with cache
             logits, _, kv_caches = self.forward(

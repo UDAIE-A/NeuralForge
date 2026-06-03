@@ -42,7 +42,7 @@ def main():
     # Load checkpoint
     print(f"Loading checkpoint: {args.checkpoint}")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
     # Get config
     config = checkpoint['config']
@@ -120,6 +120,8 @@ def main():
         
         # Decode
         text = tokenizer.decode(generated[0].tolist())
+        # Clean up non-printable characters
+        text = ''.join(c if c.isprintable() or c in '\n\r\t' else ' ' for c in text)
         print(f"Generated: {text}")
 
 
