@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neuralforge.core import NeuralForge, ModelConfig
 from neuralforge.tokenizer import BPETokenizer
+from neuralforge.tokenizer.char_tokenizer import CharTokenizer
 
 
 def main():
@@ -56,7 +57,14 @@ def main():
         os.path.dirname(args.checkpoint), 'tokenizer.pkl'
     )
     print(f"Loading tokenizer: {tokenizer_path}")
-    tokenizer = BPETokenizer.load(tokenizer_path)
+    
+    # Try char tokenizer first, fall back to BPE
+    try:
+        tokenizer = CharTokenizer.load(tokenizer_path)
+        print("  (character-level tokenizer)")
+    except (KeyError, Exception):
+        tokenizer = BPETokenizer.load(tokenizer_path)
+        print("  (BPE tokenizer)")
     
     # Create model
     config.vocab_size = len(tokenizer)
