@@ -4,127 +4,126 @@ A language model built from the ground up with no dependencies on external model
 
 ## Overview
 
-NeuralForge is a GPT-style decoder-only transformer language model implemented entirely from scratch. The goal is to build a model that starts small (millions of parameters) and can scale up to 120B+ parameters.
+NeuralForge is a GPT-style decoder-only transformer language model implemented entirely from scratch. No pre-trained weights, no external model dependencies - pure PyTorch from random initialization.
 
 ### Features
 
 - **Pure implementation**: No dependencies on existing model weights or architectures
-- **Scalable**: From 10M to 120B+ parameters
-- **BPE Tokenizer**: Byte Pair Encoding tokenizer trained from scratch
-- **Modern architecture**: Pre-norm transformer with GELU activation
-- **Efficient generation**: KV-cache for fast autoregressive generation
-
-## Architecture
-
-```
-Token Embedding + Positional Embedding
-        ↓
-   Dropout
-        ↓
-┌─────────────────┐
-│ Transformer Block │ × N layers
-│  ├─ Layer Norm   │
-│  ├─ Self-Attention│
-│  ├─ Residual     │
-│  ├─ Layer Norm   │
-│  ├─ Feed-Forward │
-│  └─ Residual     │
-└─────────────────┘
-        ↓
-   Layer Norm
-        ↓
-   LM Head (weight-tied)
-        ↓
-     Logits
-```
+- **Scalable**: From 6M to 70B+ parameters
+- **Dual tokenizers**: BPE tokenizer or fast character-level tokenizer
+- **Flash Attention**: Optimized attention for faster training
+- **Visual dashboard**: Real-time training metrics, GPU stats, loss trends
+- **GPU-only**: CUDA required for training
+- **KV-cache**: Efficient autoregressive text generation
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Setup
 
 ```bash
-pip install torch
+git clone https://github.com/UDAIE-A/NeuralForge.git
+cd NeuralForge
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
-### 2. Prepare training data
+### 2. Prepare data
 
-Create a text file with your training data:
+Put your training data in a text file:
 
 ```bash
-# Example: use any text corpus
-cp data/sample.txt data/train.txt
+# Any text file works - books, articles, code, etc.
+# Larger data = better results
 ```
 
-### 3. Train tokenizer and model
+### 3. Train
 
 ```bash
-# Train a tiny model (~10M params)
-python train.py --preset tiny --data data/train.txt --epochs 10
+# Fast training with character-level tokenizer (recommended for quick tests)
+python train.py --preset small --data data/train.txt --epochs 100 --batch-size 64 --seq-len 512 --char
 
-# Train a small model (~50M params)
-python train.py --preset small --data train.txt --epochs 20 --vocab-size 16000
+# Better quality with BPE tokenizer (slower tokenizer training)
+python train.py --preset small --data data/train.txt --epochs 100 --batch-size 64 --seq-len 512
 ```
 
 ### 4. Generate text
 
 ```bash
-# Single generation
-python generate.py --checkpoint checkpoints/best_model.pt --prompt "The "
+python generate.py --checkpoint checkpoints/epoch_100.pt --prompt "Alice" --max-tokens 200
 
 # Interactive mode
-python generate.py --checkpoint checkpoints/best_model.pt --interactive
+python generate.py --checkpoint checkpoints/epoch_100.pt --interactive
 ```
 
 ## Model Sizes
 
-| Preset | Parameters | d_model | n_heads | n_layers | d_ff |
-|--------|------------|---------|---------|----------|------|
-| tiny   | ~10M       | 128     | 4       | 4        | 512  |
-| small  | ~50M       | 256     | 8       | 8        | 1024 |
-| base   | ~250M      | 768     | 12      | 12       | 3072 |
-| large  | ~1B        | 1024    | 16      | 24       | 4096 |
-| xl     | ~8B        | 2048    | 32      | 32       | 8192 |
-| xxl    | ~70B       | 4096    | 32      | 80       | 16384|
+| Preset | Parameters | d_model | n_heads | n_layers | d_ff | VRAM (approx) |
+|--------|------------|---------|---------|----------|------|---------------|
+| tiny   | ~6M        | 128     | 4       | 4        | 512  | ~2 GB         |
+| small  | ~7M        | 256     | 8       | 8        | 1024 | ~4 GB         |
+| base   | ~120M      | 768     | 12      | 12       | 3072 | ~8 GB         |
+| large  | ~350M      | 1024    | 16      | 24       | 4096 | ~12 GB        |
+| xl     | ~1.5B      | 2048    | 32      | 32       | 8192 | ~24 GB        |
+
+## Tokenizers
+
+### Character-level (`--char`)
+- Instant training (no tokenizer learning needed)
+- Faster training on small datasets
+- Lower quality output
+- Good for quick experiments
+
+### BPE (default)
+- Learns subword units from data
+- Better quality output
+- Slower tokenizer training
+- Recommended for serious training
 
 ## Project Structure
 
 ```
 neuralforge/
 ├── core/
-│   ├── __init__.py
-│   ├── config.py        # Model configuration
-│   └── model.py         # Transformer architecture
+│   ├── config.py          # Model configuration (tiny to xxl)
+│   └── model.py           # Transformer with Flash Attention
 ├── tokenizer/
-│   ├── __init__.py
-│   └── bpe.py           # BPE tokenizer
+│   ├── bpe.py             # BPE tokenizer from scratch
+│   └── char_tokenizer.py  # Character-level tokenizer
 ├── training/
-│   ├── __init__.py
-│   ├── data.py          # Data loading
-│   └── trainer.py       # Training loop
-├── inference/
-│   ├── __init__.py
-│   └── generate.py      # Text generation
-├── data/
-│   └── sample.txt       # Sample training data
-├── train.py             # Main training script
-├── generate.py          # Main generation script
-├── requirements.txt
-└── README.md
+│   ├── data.py            # Dataset and DataLoader
+│   └── trainer.py         # Training with visual dashboard
+├── train.py               # Main training script
+├── generate.py            # Text generation
+├── data/                  # Training data
+└── checkpoints/           # Saved models
 ```
 
-## Training Tips
+## Training Dashboard
 
-1. **Start small**: Begin with the `tiny` preset to verify everything works
-2. **Use enough data**: More data = better generalization
-3. **Monitor validation loss**: Stop when it starts increasing (overfitting)
-4. **Scale gradually**: Move from tiny → small → base as you get better results
+Real-time metrics during training:
+- Epoch and batch progress bars
+- Loss value and trend sparkline
+- GPU utilization, memory, temperature
+- Tokens per second throughput
+- ETA and elapsed time
+- Ctrl+C saves checkpoint and shows resume command
+
+## Requirements
+
+- Python 3.8+
+- PyTorch 2.0+
+- NVIDIA GPU with CUDA support
+- 4-12 GB VRAM depending on model size
 
 ## Roadmap
 
-- [x] Basic transformer architecture
-- [x] BPE tokenizer from scratch
-- [x] Training pipeline
-- [x] Text generation
+- [x] Transformer architecture from scratch
+- [x] BPE tokenizer
+- [x] Character-level tokenizer
+- [x] Flash Attention
+- [x] Visual training dashboard
+- [x] GPU-only training
 - [ ] Multi-GPU training
 - [ ] Gradient checkpointing for large models
 - [ ] Mixture of Experts for scaling
@@ -133,4 +132,8 @@ neuralforge/
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Author
+
+**UDAIE-A** - [GitHub](https://github.com/UDAIE-A)
