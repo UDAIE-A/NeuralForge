@@ -15,6 +15,7 @@ class MultiHeadAttention(nn.Module):
         self.n_heads = config.n_heads
         self.d_head = config.d_head
         self.d_model = config.d_model
+        self.dropout_p = config.dropout
         
         # Linear projections for Q, K, V
         self.q_proj = nn.Linear(config.d_model, config.d_model, bias=False)
@@ -65,7 +66,7 @@ class MultiHeadAttention(nn.Module):
         att = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=causal_mask,
-            dropout_p=self.config.dropout if self.training else 0,
+            dropout_p=self.dropout_p if self.training else 0,
             is_causal=False
         )
         
