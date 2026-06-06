@@ -73,6 +73,14 @@ class TextDataset(Dataset):
         return x, y
 
 
+def _read_text(data: str) -> str:
+    """Return raw text from a file path or a literal string."""
+    if os.path.exists(data):
+        with open(data, 'r', encoding='utf-8') as f:
+            return f.read()
+    return data
+
+
 def create_dataloaders(
     train_data: str,
     val_data: Optional[str],
@@ -80,7 +88,8 @@ def create_dataloaders(
     seq_len: int = 512,
     batch_size: int = 32,
     stride: int = 256,
-    num_workers: int = 8
+    num_workers: int = 8,
+    val_fraction: float = 0.05,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
     Create train and validation dataloaders.
@@ -97,8 +106,20 @@ def create_dataloaders(
     Returns:
         (train_loader, val_loader)
     """
+    # If no explicit validation data is given, hold out the tail of the
+    # training text as a contiguous validation split so best_model.pt and the
+    # validation loss are actually meaningful. Split on raw text (not on
+    # overlapping strided sequences) to avoid train/val leakage.
+    if val_data is None and val_fraction > 0:
+        full_text = _read_text(train_data)
+        split_at = int(len(full_text) * (1 - val_fraction))
+        train_text, val_text = full_text[:split_at], full_text[split_at:]
+        if len(val_text) > seq_len:
+            print(f"  Auto val split: {len(train_text):,} train / {len(val_text):,} val chars")
+            train_data, val_data = train_text, val_text
+
     train_dataset = TextDataset(train_data, tokenizer, seq_len, stride)
-    
+
     # Cap batch size to dataset size
     effective_batch_size = min(batch_size, len(train_dataset))
     if effective_batch_size < batch_size:
