@@ -34,7 +34,8 @@ runs/
 # Logs
 *.log
 
-# Training data (large files)
+# Training data (large files) - including nested folders like data/books/
+data/**/*.txt
 data/*.txt
 data/train*.txt
 
