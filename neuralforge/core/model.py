@@ -248,23 +248,29 @@ class NeuralForge(nn.Module):
         idx: torch.Tensor,
         max_new_tokens: int = 100,
         temperature: float = 0.8,
-        top_k: Optional[int] = 50
+        top_k: Optional[int] = 50,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0
     ) -> torch.Tensor:
         """
         Generate text autoregressively.
-        
+
         Args:
             idx: Starting token indices (B, T)
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_k: If set, only sample from top-k tokens
-            
+            top_p: If set, nucleus sampling - keep the smallest set of tokens
+                whose cumulative probability exceeds top_p
+            repetition_penalty: >1.0 discourages repeating tokens already in
+                the sequence (1.0 disables it)
+
         Returns:
             Generated token indices (B, T + max_new_tokens)
         """
         self.eval()
         kv_caches = None
-        
+
         for _ in range(max_new_tokens):
             # First step: feed the full prompt; subsequent steps: only last token
             if kv_caches is None:
@@ -272,29 +278,52 @@ class NeuralForge(nn.Module):
                            idx[:, -self.config.max_seq_len:]
             else:
                 idx_cond = idx[:, -1:]
-            
+
             # Forward pass with cache
             logits, _, kv_caches = self.forward(
                 idx_cond,
                 kv_caches=kv_caches,
                 use_cache=True
             )
-            
+
             # Get logits for last position
-            logits = logits[:, -1, :] / temperature
-            
+            logits = logits[:, -1, :]
+
+            # Repetition penalty: divide logits of already-seen tokens (CTRL
+            # style - positive logits shrink, negative logits grow).
+            if repetition_penalty != 1.0:
+                for b in range(idx.size(0)):
+                    seen = torch.unique(idx[b])
+                    scores = logits[b, seen]
+                    logits[b, seen] = torch.where(
+                        scores > 0, scores / repetition_penalty, scores * repetition_penalty
+                    )
+
+            logits = logits / temperature
+
             # Top-k filtering
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float('-inf')
-            
+
+            # Top-p (nucleus) filtering
+            if top_p is not None and 0 < top_p < 1.0:
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+                cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                # Mask tokens past the nucleus, always keeping the top token.
+                remove = cum_probs > top_p
+                remove[..., 1:] = remove[..., :-1].clone()
+                remove[..., 0] = False
+                sorted_logits[remove] = float('-inf')
+                logits = sorted_logits.scatter(-1, sorted_idx, sorted_logits)
+
             # Sample
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
-            
+
             # Append
             idx = torch.cat([idx, idx_next], dim=1)
-        
+
         return idx
     
     def count_parameters(self) -> int:

@@ -33,6 +33,10 @@ def main():
                        help='Sampling temperature')
     parser.add_argument('--top-k', type=int, default=50,
                        help='Top-k sampling')
+    parser.add_argument('--top-p', type=float, default=None,
+                       help='Top-p (nucleus) sampling threshold, e.g. 0.9')
+    parser.add_argument('--repetition-penalty', type=float, default=1.0,
+                       help='Penalty for repeating tokens (>1.0 discourages repetition)')
     parser.add_argument('--interactive', action='store_true',
                        help='Interactive mode')
     
@@ -104,9 +108,11 @@ def main():
                         x,
                         max_new_tokens=args.max_tokens,
                         temperature=args.temperature,
-                        top_k=args.top_k
+                        top_k=args.top_k,
+                        top_p=args.top_p,
+                        repetition_penalty=args.repetition_penalty
                     )
-                
+
                 # Decode
                 response = tokenizer.decode(generated[0].tolist())
                 print(f"NeuralForge: {response}\n")
@@ -129,9 +135,11 @@ def main():
                 x,
                 max_new_tokens=args.max_tokens,
                 temperature=args.temperature,
-                top_k=args.top_k
+                top_k=args.top_k,
+                top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty
             )
-        
+
         # Decode
         text = tokenizer.decode(generated[0].tolist())
         # Clean up non-printable characters
