@@ -3,8 +3,8 @@
 NeuralForge Text Generation Script
 
 Usage:
-    python generate.py --checkpoint checkpoints/best_model.pt --prompt "The "
-    python generate.py --checkpoint checkpoints/best_model.pt --interactive
+    python generate.py --checkpoint checkpoints/tiny.pt --prompt "The "
+    python generate.py --checkpoint checkpoints/tiny.pt --interactive
 """
 
 import argparse
@@ -56,23 +56,25 @@ def main():
     config = checkpoint['config']
     config.device = "cuda"
     
-    # Load tokenizer
-    tokenizer_path = args.tokenizer or os.path.join(
-        os.path.dirname(args.checkpoint), 'tokenizer.pkl'
-    )
-    print(f"Loading tokenizer: {tokenizer_path}")
-    
-    # Detect tokenizer type from the saved contents rather than relying on a
-    # load failure: char tokenizers store 'char_to_id', BPE stores 'merges'.
-    import pickle
-    with open(tokenizer_path, 'rb') as f:
-        tok_data = pickle.load(f)
-    if 'char_to_id' in tok_data:
-        tokenizer = CharTokenizer.load(tokenizer_path)
-        print("  (character-level tokenizer)")
+    # Load tokenizer. Published "<name>.pt" models embed the tokenizer, so it's
+    # self-contained; otherwise fall back to a tokenizer.pkl beside the file.
+    if args.tokenizer is None and checkpoint.get('tokenizer_obj') is not None:
+        tokenizer = checkpoint['tokenizer_obj']
+        print("  (embedded tokenizer)")
     else:
-        tokenizer = BPETokenizer.load(tokenizer_path)
-        print("  (BPE tokenizer)")
+        tokenizer_path = args.tokenizer or os.path.join(
+            os.path.dirname(args.checkpoint), 'tokenizer.pkl'
+        )
+        print(f"Loading tokenizer: {tokenizer_path}")
+        import pickle
+        with open(tokenizer_path, 'rb') as f:
+            tok_data = pickle.load(f)
+        if 'char_to_id' in tok_data:
+            tokenizer = CharTokenizer.load(tokenizer_path)
+            print("  (character-level tokenizer)")
+        else:
+            tokenizer = BPETokenizer.load(tokenizer_path)
+            print("  (BPE tokenizer)")
     
     # Create model using config from checkpoint (has correct vocab_size)
     model = NeuralForge(config)

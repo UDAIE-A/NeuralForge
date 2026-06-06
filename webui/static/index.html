@@ -68,6 +68,7 @@
   select, input[type=text], input[type=number] {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; font-size: 13.5px; font-family: inherit; width: 100%;
   }
+  select[multiple] { min-height: 132px; }
   select:focus, input:focus { outline: none; border-color: var(--accent); }
 
   .settings { margin-top: 12px; }
@@ -169,9 +170,11 @@
         <div class="card">
           <h3>Configure &amp; Train</h3>
           <div class="grid2">
+            <div class="field"><label>Model name</label><input type="text" id="mname" placeholder="e.g. tiny" value="tiny"></div>
             <div class="field"><label>Preset</label><select id="preset"></select></div>
-            <div class="field"><label>Data file</label><select id="data"></select></div>
           </div>
+          <div class="field"><label>Resume checkpoint</label><select id="resumeCkpt"><option value="">Start fresh</option></select></div>
+          <div class="field"><label>Data files</label><select id="data" multiple></select></div>
           <div class="field">
             <label>Tokenizer</label>
             <div class="seg">
@@ -212,12 +215,6 @@
           </div>
         </div>
 
-        <!-- Loss chart -->
-        <div class="card">
-          <h3>Loss Curve</h3>
-          <canvas id="lossChart" height="150"></canvas>
-        </div>
-
         <!-- GPU -->
         <div class="card">
           <h3>GPU</h3>
@@ -244,14 +241,23 @@ async function loadInfo() {
   else $('gpuName').textContent = d.cuda ? 'CUDA GPU' : 'No CUDA';
   $('preset').innerHTML = d.presets.map(p => `<option value="${p}" ${p==='small'?'selected':''}>${p}</option>`).join('');
   $('data').innerHTML = d.datafiles.map(f => `<option value="${f.path}">${f.name} (${f.size_kb}KB)</option>`).join('');
+  if ($('data').options.length) $('data').options[0].selected = true;
   CHECKPOINTS = d.checkpoints;
   renderModels();
 }
 function renderModels() {
-  const sel = $('chatModel'); const cur = sel.value;
-  if (!CHECKPOINTS.length) { sel.innerHTML = '<option value="">No checkpoints yet</option>'; return; }
-  sel.innerHTML = CHECKPOINTS.map(c => `<option value="${c.path}">${c.name} · ${c.size_mb}MB</option>`).join('');
-  if (cur) sel.value = cur;
+  const chatSel = $('chatModel'); const chatCur = chatSel.value;
+  const resumeSel = $('resumeCkpt'); const resumeCur = resumeSel.value;
+  if (!CHECKPOINTS.length) {
+    chatSel.innerHTML = '<option value="">No checkpoints yet</option>';
+    resumeSel.innerHTML = '<option value="">Start fresh</option>';
+    return;
+  }
+  const options = CHECKPOINTS.map(c => `<option value="${c.path}">${c.name} · ${c.size_mb}MB</option>`).join('');
+  chatSel.innerHTML = options;
+  resumeSel.innerHTML = '<option value="">Start fresh</option>' + options;
+  if (chatCur) chatSel.value = chatCur;
+  if (resumeCur) resumeSel.value = resumeCur;
 }
 async function refreshCheckpoints() {
   const r = await fetch('/api/checkpoints'); CHECKPOINTS = await r.json(); renderModels();
@@ -271,8 +277,12 @@ bind('temp','vTemp'); bind('topp','vTopp'); bind('topk','vTopk'); bind('rep','vR
 // ---- training control ----
 $('startBtn').onclick = async () => {
   $('trainErr').textContent='';
+  const selectedData = Array.from($('data').selectedOptions).map(o => o.value);
+  if (!selectedData.length) { $('trainErr').textContent = 'Select at least one data file'; return; }
   const body = {
-    preset: $('preset').value, data: $('data').value, char: TOK==='char',
+    name: $('mname').value.trim() || $('preset').value,
+    resume: $('resumeCkpt').value,
+    preset: $('preset').value, data: selectedData, char: TOK==='char',
     epochs: +$('epochs').value, seq_len: +$('seqlen').value, batch_size: +$('batch').value,
     lr: $('lr').value, vocab_size: +$('vocab').value, checkpoint_dir: $('ckptdir').value,
   };
@@ -281,23 +291,6 @@ $('startBtn').onclick = async () => {
   if(!d.ok){ $('trainErr').textContent = d.error || 'Failed to start'; }
 };
 $('stopBtn').onclick = async () => { await fetch('/api/train/stop',{method:'POST'}); };
-
-// ---- loss chart ----
-let chart;
-function initChart(){
-  chart = new Chart($('lossChart'), {
-    type:'line',
-    data:{ labels:[], datasets:[{ data:[], borderColor:'#10a37f', backgroundColor:'rgba(16,163,127,.12)', fill:true, tension:.25, pointRadius:0, borderWidth:2 }]},
-    options:{ animation:false, plugins:{legend:{display:false}}, scales:{
-      x:{ display:false }, y:{ grid:{color:'#262d3d'}, ticks:{color:'#8b93a7', font:{size:10}} } }, responsive:true, maintainAspectRatio:false }
-  });
-}
-function updateChart(hist){
-  if(!chart) return;
-  chart.data.labels = hist.map(h=>h.step);
-  chart.data.datasets[0].data = hist.map(h=>h.loss);
-  chart.update('none');
-}
 
 // ---- metrics websocket ----
 function connectMetrics(){
@@ -332,7 +325,6 @@ function connectMetrics(){
     $('mElapsed').textContent=d.elapsed?fmtTime(d.elapsed):'—';
     $('mBest').textContent=d.best_val_loss!=null?d.best_val_loss.toFixed(4):'—';
     if(d.error) $('trainErr').textContent=d.error;
-    updateChart(d.loss_history||[]);
     // when a run finishes, refresh checkpoint list
     if(lastStatus==='training' && (d.status==='complete'||d.status==='stopped')) refreshCheckpoints();
     lastStatus=d.status;
@@ -377,7 +369,7 @@ $('prompt').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.p
 $('prompt').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,160)+'px'; });
 
 // ---- go ----
-initChart(); loadInfo(); connectMetrics(); connectChat();
+loadInfo(); connectMetrics(); connectChat();
 </script>
 </body>
 </html>

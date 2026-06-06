@@ -123,9 +123,17 @@ class Trainer:
         keep_last: int = 3,
         metrics_callback=None,
         should_stop=None,
+        model_name: str = "model",
+        tokenizer=None,
     ):
         self.model = model
         self.keep_last = keep_last
+        # Named-model checkpointing. While training we keep a single rolling
+        # "<name>_train.pt" (full state, resumable) plus "<name>_best.pt"; on
+        # completion we publish a clean weights-only "<name>.pt" with the
+        # tokenizer embedded, and delete the training file. No epoch_N spam.
+        self.model_name = model_name
+        self.tokenizer = tokenizer
         # Optional hooks for external monitoring/control (e.g. the web UI).
         # metrics_callback(dict) is called each batch; should_stop() -> bool is
         # checked each batch to allow a cooperative early stop.
@@ -349,8 +357,8 @@ class Trainer:
             # Cooperative early stop (web UI stop button)
             if self.should_stop is not None and self.should_stop():
                 self._stop_requested = True
-                self.save_checkpoint(f"epoch_{epoch}_interrupted.pt")
-                print(f"\n  >> Stop requested - saved epoch_{epoch}_interrupted.pt")
+                self.save_training()
+                print(f"\n  >> Stop requested - saved {os.path.basename(self.training_path)} (resumable)")
                 break
 
             # Evaluation
@@ -359,13 +367,12 @@ class Trainer:
                 print(f"\n  >> Validation Loss: {val_loss:.4f}")
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
-                    self.save_checkpoint("best_model.pt")
+                    self.save_best()
                 self.model.train()
-            
-            # Save checkpoint
+
+            # Roll the resumable training checkpoint periodically
             if self.global_step % self.save_interval == 0:
-                self.save_checkpoint(f"step_{self.global_step}.pt")
-                print(f"\n  >> Saved checkpoint: step_{self.global_step}.pt")
+                self.save_training()
         
         # End of epoch
         avg_epoch_loss = total_loss / len(self.train_loader)
@@ -423,32 +430,42 @@ class Trainer:
                 if self._stop_requested:
                     print("\n  Training stopped early by request.")
                     break
-                self.save_checkpoint(f"epoch_{epoch}.pt")
-                # Evaluate at the end of every epoch so best_model.pt is saved
+                # Roll the resumable training checkpoint (single file)
+                self.save_training()
+                # Evaluate at the end of every epoch so the best model is saved
                 # reliably even on short runs (step-based eval can never fire).
                 if self.val_loader:
                     val_loss = self.evaluate()
                     print(f"  Epoch {epoch} validation loss: {val_loss:.4f}")
                     if val_loss < self.best_val_loss:
                         self.best_val_loss = val_loss
-                        self.save_checkpoint("best_model.pt")
+                        self.save_best()
                     self.model.train()
+
+            # Publish the clean final model and remove the training checkpoint.
+            if not self._stop_requested:
+                self.publish()
 
             total_time = time.time() - self.train_start_time
             print()
             print("=" * 70)
-            print("  TRAINING COMPLETE")
+            print("  TRAINING COMPLETE" if not self._stop_requested else "  TRAINING STOPPED")
             print("=" * 70)
             print(f"  Total time:    {format_time(total_time)}")
-            print(f"  Final loss:    {self.epoch_losses[-1]:.4f}")
+            if self.epoch_losses:
+                print(f"  Final loss:    {self.epoch_losses[-1]:.4f}")
             print(f"  Best val loss: {self.best_val_loss:.4f}")
             print(f"  Total steps:   {self.global_step}")
+            if not self._stop_requested:
+                print(f"  Model:         {os.path.relpath(self.published_path)}")
+            else:
+                print(f"  Resume:        python train.py --resume {os.path.relpath(self.training_path)}")
             print("=" * 70)
             
         except KeyboardInterrupt:
-            # Save current progress before exiting
-            self.save_checkpoint(f"epoch_{len(self.epoch_losses)}_interrupted.pt")
-            
+            # Save resumable progress before exiting (single rolling file)
+            self.save_training()
+
             total_time = time.time() - self.train_start_time
             print()
             print()
@@ -459,51 +476,85 @@ class Trainer:
             print(f"  Steps:     {self.global_step}")
             last_loss = f"{self.epoch_losses[-1]:.4f}" if self.epoch_losses else "N/A"
             print(f"  Last loss: {last_loss}")
-            print(f"  Saved:     checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
-            print(f"  Resume:    python train.py --resume checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
+            print(f"  Saved:     {os.path.relpath(self.training_path)}")
+            print(f"  Resume:    python train.py --resume {os.path.relpath(self.training_path)}")
             print("=" * 70)
     
     def _unwrapped_model(self):
         """Return the underlying module, unwrapping torch.compile if present."""
         return getattr(self.model, '_orig_mod', self.model)
 
-    def save_checkpoint(self, filename: str):
-        """Save model checkpoint."""
-        path = os.path.join(self.checkpoint_dir, filename)
-        torch.save({
+    # --- paths for the named-model artifacts ------------------------------
+    @property
+    def training_path(self):
+        return os.path.join(self.checkpoint_dir, f"{self.model_name}_train.pt")
+
+    @property
+    def best_path(self):
+        return os.path.join(self.checkpoint_dir, f"{self.model_name}_best.pt")
+
+    @property
+    def published_path(self):
+        return os.path.join(self.checkpoint_dir, f"{self.model_name}.pt")
+
+    def _full_checkpoint(self):
+        """Full, resumable state (weights + optimizer + scheduler)."""
+        return {
             'model_state_dict': self._unwrapped_model().state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': {'step_num': self.scheduler.step_num},
             'global_step': self.global_step,
             'best_val_loss': self.best_val_loss,
             'config': self.config,
-        }, path)
-        self._prune_checkpoints()
+        }
 
-    def _prune_checkpoints(self):
-        """Keep only the newest `keep_last` rotating checkpoints.
+    def save_training(self):
+        """Overwrite the single rolling training checkpoint (resumable)."""
+        torch.save(self._full_checkpoint(), self.training_path)
 
-        best_model.pt and *interrupted* checkpoints are always preserved; only
-        the routine epoch_*/step_* snapshots are rotated.
+    def save_best(self):
+        """Overwrite the best-by-validation checkpoint."""
+        torch.save(self._full_checkpoint(), self.best_path)
+
+    def publish(self):
+        """Write the clean, self-contained final model and drop training state.
+
+        The published "<name>.pt" holds weights + config + the embedded
+        tokenizer + metadata - no optimizer state - so it's a small, portable
+        artifact. The bulky "<name>_train.pt" is deleted afterwards.
         """
-        if not self.keep_last or self.keep_last <= 0:
-            return
-        for pattern in ('epoch_*.pt', 'step_*.pt'):
-            files = glob.glob(os.path.join(self.checkpoint_dir, pattern))
-            files = [f for f in files if 'interrupted' not in os.path.basename(f)]
-            files.sort(key=os.path.getmtime)
-            for stale in files[:-self.keep_last]:
-                try:
-                    os.remove(stale)
-                except OSError:
-                    pass
-    
+        artifact = {
+            'model_state_dict': self._unwrapped_model().state_dict(),
+            'config': self.config,
+            'tokenizer_obj': self.tokenizer,
+            'meta': {
+                'name': self.model_name,
+                'epochs': len(self.epoch_losses),
+                'final_loss': self.epoch_losses[-1] if self.epoch_losses else None,
+                'best_val_loss': None if self.best_val_loss == float('inf') else self.best_val_loss,
+                'global_step': self.global_step,
+                'created': time.strftime('%Y-%m-%d %H:%M:%S'),
+            },
+        }
+        torch.save(artifact, self.published_path)
+        # Merge & delete: the final model supersedes the training checkpoint.
+        if os.path.exists(self.training_path):
+            try:
+                os.remove(self.training_path)
+            except OSError:
+                pass
+        print(f"  Published model -> {os.path.relpath(self.published_path)}"
+              f" (training checkpoint removed)")
+
     def load_checkpoint(self, path: str):
-        """Load model checkpoint."""
+        """Resume from a full checkpoint (e.g. <name>_train.pt)."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self._unwrapped_model().load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.step_num = checkpoint['scheduler_state_dict']['step_num']
-        self.global_step = checkpoint['global_step']
-        self.best_val_loss = checkpoint['best_val_loss']
-        print(f"  Resumed from step {self.global_step}")
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.scheduler.step_num = checkpoint['scheduler_state_dict']['step_num']
+            self.global_step = checkpoint['global_step']
+            self.best_val_loss = checkpoint['best_val_loss']
+            print(f"  Resumed from step {self.global_step}")
+        else:
+            print("  Loaded published weights (no optimizer state to resume)")

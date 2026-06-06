@@ -33,6 +33,7 @@ from neuralforge.core import NeuralForge, ModelConfig
 from neuralforge.tokenizer import BPETokenizer
 from neuralforge.tokenizer.char_tokenizer import CharTokenizer
 from neuralforge.training import Trainer, create_dataloaders
+from neuralforge.training.data import read_text_input
 from neuralforge.training.trainer import get_gpu_stats
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +55,6 @@ TRAIN = {
     "loss": None, "lr": None, "tokens_per_sec": 0,
     "eta": 0, "elapsed": 0,
     "best_val_loss": None,
-    "loss_history": [],   # [{step, loss}]
 }
 TRAIN_LOCK = threading.Lock()
 STOP_FLAG = {"stop": False}
@@ -93,12 +93,33 @@ def list_datafiles():
     return files
 
 
+def resolve_data_selection(selection):
+    """Resolve one or more UI-selected data files to absolute paths."""
+    if isinstance(selection, list):
+        return [os.path.join(ROOT, rel) for rel in selection]
+    return os.path.join(ROOT, selection)
+
+
 def load_tokenizer(path):
     with open(path, "rb") as f:
         data = pickle.load(f)
     if "char_to_id" in data:
         return CharTokenizer.load(path)
     return BPETokenizer.load(path)
+
+
+def load_resume_artifacts(resume_path):
+    """Load config + tokenizer from a saved checkpoint for continuation."""
+    checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+    config = checkpoint["config"]
+    if checkpoint.get("tokenizer_obj") is not None:
+        tokenizer = checkpoint["tokenizer_obj"]
+    else:
+        tok_path = os.path.join(os.path.dirname(resume_path), "tokenizer.pkl")
+        if not os.path.exists(tok_path):
+            raise FileNotFoundError("tokenizer.pkl not found next to resume checkpoint")
+        tokenizer = load_tokenizer(tok_path)
+    return config, tokenizer
 
 
 def load_model_for_inference(ckpt_rel):
@@ -116,10 +137,14 @@ def load_model_for_inference(ckpt_rel):
         config = checkpoint["config"]
         config.device = "cuda"
 
-        tok_path = os.path.join(os.path.dirname(ckpt_path), "tokenizer.pkl")
-        if not os.path.exists(tok_path):
-            raise FileNotFoundError("tokenizer.pkl not found next to checkpoint")
-        tokenizer = load_tokenizer(tok_path)
+        # Published models embed the tokenizer; otherwise look beside the file.
+        if checkpoint.get("tokenizer_obj") is not None:
+            tokenizer = checkpoint["tokenizer_obj"]
+        else:
+            tok_path = os.path.join(os.path.dirname(ckpt_path), "tokenizer.pkl")
+            if not os.path.exists(tok_path):
+                raise FileNotFoundError("tokenizer.pkl not found next to checkpoint")
+            tokenizer = load_tokenizer(tok_path)
 
         model = NeuralForge(config)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -135,7 +160,7 @@ def _reset_train_state(params, num_epochs):
             "running": True, "status": "starting", "error": None, "params": params,
             "epoch": 0, "num_epochs": num_epochs, "batch": 0, "total_batches": 0,
             "global_step": 0, "loss": None, "lr": None, "tokens_per_sec": 0,
-            "eta": 0, "elapsed": 0, "best_val_loss": None, "loss_history": [],
+            "eta": 0, "elapsed": 0, "best_val_loss": None,
         })
 
 
@@ -150,11 +175,6 @@ def _metrics_cb(m):
             "tokens_per_sec": int(m["tokens_per_sec"]),
             "eta": m["eta"], "elapsed": m["elapsed"],
         })
-        # Keep a light loss history for the chart (cap length).
-        hist = TRAIN["loss_history"]
-        hist.append({"step": m["global_step"], "loss": round(m["loss"], 4)})
-        if len(hist) > 2000:
-            del hist[: len(hist) - 2000]
 
 
 def _training_worker(params):
@@ -164,43 +184,51 @@ def _training_worker(params):
         num_epochs = int(params["epochs"])
         _reset_train_state(params, num_epochs)
 
-        data_rel = params["data"]
-        data_path = os.path.join(ROOT, data_rel)
-        with open(data_path, "r", encoding="utf-8") as f:
-            text = f.read()
+        data_input = resolve_data_selection(params["data"])
+        text = read_text_input(data_input)
 
         ckpt_dir = os.path.join(ROOT, params.get("checkpoint_dir", "checkpoints"))
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        # Tokenizer
-        with TRAIN_LOCK:
-            TRAIN["status"] = "building tokenizer"
-        if params.get("char"):
-            tokenizer = CharTokenizer()
-            tokenizer.train(text)
+        resume_rel = (params.get("resume") or "").strip()
+        if resume_rel:
+            with TRAIN_LOCK:
+                TRAIN["status"] = "loading checkpoint"
+            resume_path = os.path.join(ROOT, resume_rel)
+            config, tokenizer = load_resume_artifacts(resume_path)
+            config.device = "cuda"
         else:
-            tokenizer = BPETokenizer()
-            tokenizer.train(text, vocab_size=int(params.get("vocab_size", 8000)))
-        tokenizer.save(os.path.join(ckpt_dir, "tokenizer.pkl"))
+            # Tokenizer
+            with TRAIN_LOCK:
+                TRAIN["status"] = "building tokenizer"
+            if params.get("char"):
+                tokenizer = CharTokenizer()
+                tokenizer.train(text)
+            else:
+                tokenizer = BPETokenizer()
+                tokenizer.train(text, vocab_size=int(params.get("vocab_size", 8000)))
 
-        # Config + model
-        config = ModelConfig.from_preset(params["preset"])
-        config.max_seq_len = int(params["seq_len"])
-        config.batch_size = int(params["batch_size"])
-        config.learning_rate = float(params["lr"])
-        config.vocab_size = len(tokenizer)
-        config.device = "cuda"
+            # Config + model
+            config = ModelConfig.from_preset(params["preset"])
+            config.max_seq_len = int(params["seq_len"])
+            config.batch_size = int(params["batch_size"])
+            config.learning_rate = float(params["lr"])
+            config.vocab_size = len(tokenizer)
+            config.device = "cuda"
+
+        tokenizer.save(os.path.join(ckpt_dir, "tokenizer.pkl"))
 
         with TRAIN_LOCK:
             TRAIN["status"] = "building model"
         model = NeuralForge(config)
 
         train_loader, val_loader = create_dataloaders(
-            data_path, None, tokenizer,
+            data_input, None, tokenizer,
             seq_len=config.max_seq_len, batch_size=config.batch_size,
             num_workers=0,  # threads + Windows: keep it single-process
         )
 
+        model_name = params.get("name") or params["preset"]
         trainer = Trainer(
             model=model, config=config,
             train_loader=train_loader, val_loader=val_loader,
@@ -208,7 +236,11 @@ def _training_worker(params):
             compile_model=False,  # avoid compile latency inside the server
             metrics_callback=_metrics_cb,
             should_stop=lambda: STOP_FLAG["stop"],
+            model_name=model_name,
+            tokenizer=tokenizer,
         )
+        if resume_rel:
+            trainer.load_checkpoint(resume_path)
         trainer.train(num_epochs=num_epochs)
 
         with TRAIN_LOCK:

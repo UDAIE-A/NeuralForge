@@ -5,7 +5,27 @@ Data loading utilities for NeuralForge training.
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
+
+
+def _read_single_text(data: str) -> str:
+    """Return raw text from a file path or a literal string."""
+    if os.path.exists(data):
+        with open(data, 'r', encoding='utf-8') as f:
+            return f.read()
+    return data
+
+
+def read_text_input(data: Union[str, List[str], Tuple[str, ...]]) -> str:
+    """Read one or more text inputs into a single training corpus."""
+    if isinstance(data, (list, tuple)):
+        parts = []
+        for item in data:
+            text = _read_single_text(item)
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+    return _read_single_text(data)
 
 
 class TextDataset(Dataset):
@@ -34,11 +54,7 @@ class TextDataset(Dataset):
         self.tokenizer = tokenizer
         
         # Load data
-        if os.path.exists(data):
-            with open(data, 'r', encoding='utf-8') as f:
-                text = f.read()
-        else:
-            text = data
+        text = read_text_input(data)
         
         # Tokenize
         print(f"Tokenizing {len(text)} characters...")
@@ -73,17 +89,9 @@ class TextDataset(Dataset):
         return x, y
 
 
-def _read_text(data: str) -> str:
-    """Return raw text from a file path or a literal string."""
-    if os.path.exists(data):
-        with open(data, 'r', encoding='utf-8') as f:
-            return f.read()
-    return data
-
-
 def create_dataloaders(
-    train_data: str,
-    val_data: Optional[str],
+    train_data: Union[str, List[str], Tuple[str, ...]],
+    val_data: Optional[Union[str, List[str], Tuple[str, ...]]],
     tokenizer,
     seq_len: int = 512,
     batch_size: int = 32,
@@ -95,8 +103,8 @@ def create_dataloaders(
     Create train and validation dataloaders.
     
     Args:
-        train_data: Training text or file path
-        val_data: Validation text or file path (optional)
+        train_data: Training text, file path, or list of file paths
+        val_data: Validation text, file path, or list of file paths (optional)
         tokenizer: Tokenizer instance
         seq_len: Sequence length
         batch_size: Batch size
@@ -107,11 +115,11 @@ def create_dataloaders(
         (train_loader, val_loader)
     """
     # If no explicit validation data is given, hold out the tail of the
-    # training text as a contiguous validation split so best_model.pt and the
+    # training text as a contiguous validation split so named best/final
     # validation loss are actually meaningful. Split on raw text (not on
     # overlapping strided sequences) to avoid train/val leakage.
     if val_data is None and val_fraction > 0:
-        full_text = _read_text(train_data)
+        full_text = read_text_input(train_data)
         split_at = int(len(full_text) * (1 - val_fraction))
         train_text, val_text = full_text[:split_at], full_text[split_at:]
         if len(val_text) > seq_len:

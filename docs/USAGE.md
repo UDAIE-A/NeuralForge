@@ -43,7 +43,7 @@ Requirements: Python 3.8+, PyTorch 2.0+, and an NVIDIA GPU with CUDA
 python train.py --preset small --data data/alice.txt --char --epochs 30 --seq-len 256 --batch-size 24
 
 # 2. Generate from the result
-python generate.py --checkpoint checkpoints/epoch_30.pt --prompt "Alice " --max-tokens 200 --top-p 0.9
+python generate.py --checkpoint checkpoints/small.pt --prompt "Alice " --max-tokens 200 --top-p 0.9
 ```
 
 ---
@@ -69,10 +69,11 @@ python train.py --data <file> [options]
 | `--checkpoint-dir` | path | `checkpoints` | Where checkpoints and the tokenizer are saved. |
 | `--resume` | path | `None` | Resume training from a checkpoint `.pt`. |
 | `--char` | flag | off | Use the instant character-level tokenizer instead of BPE. |
+| `--name` | str | `<preset>` | Base model name. Produces `<name>.pt`, `<name>_train.pt`, and `<name>_best.pt`. |
 
 **Set in code (not CLI flags)** — defaults in `neuralforge/training/trainer.py`:
-`compile_model=True` (torch.compile), `keep_last=3` (checkpoint rotation),
-`gradient_accumulation_steps=1`, `eval_interval=500`, `save_interval=1000`.
+`compile_model=True` (torch.compile), `gradient_accumulation_steps=1`,
+`eval_interval=500`, `save_interval=1000`.
 Data loading uses `num_workers=8` (see `neuralforge/training/data.py`).
 
 ### Train examples
@@ -88,7 +89,7 @@ python train.py --preset small --data data/train_large.txt --vocab-size 8000 --e
 python train.py --preset small --data data/train.txt --val-data data/sample.txt --char --epochs 30
 
 # Resume an interrupted run
-python train.py --preset small --data data/train_large.txt --char --epochs 20 --resume checkpoints/epoch_8.pt
+python train.py --preset small --data data/train_large.txt --char --epochs 20 --resume checkpoints/small_train.pt
 
 # Custom checkpoint directory and learning rate
 python train.py --preset tiny --data data/alice.txt --char --epochs 100 --lr 5e-4 --checkpoint-dir runs/alice_tiny
@@ -96,7 +97,7 @@ python train.py --preset tiny --data data/alice.txt --char --epochs 100 --lr 5e-
 
 During training you get a live dashboard: epoch/batch progress, loss + trend
 sparkline, GPU utilization/memory/temperature, tokens/sec, and ETA. Press
-`Ctrl+C` to save an `*_interrupted.pt` checkpoint and print a resume command.
+`Ctrl+C` to save `<name>_train.pt` and print a resume command.
 
 ---
 
@@ -124,21 +125,21 @@ python generate.py --checkpoint <file> [options]
 
 ```bash
 # Basic
-python generate.py --checkpoint checkpoints/epoch_50.pt --prompt "It was " --max-tokens 200
+python generate.py --checkpoint checkpoints/small.pt --prompt "It was " --max-tokens 200
 
 # Higher-quality sampling (recommended): nucleus + repetition penalty
-python generate.py --checkpoint checkpoints/epoch_50.pt --prompt "It was " \
+python generate.py --checkpoint checkpoints/small.pt --prompt "It was " \
     --max-tokens 300 --temperature 0.8 --top-p 0.9 --repetition-penalty 1.2
 
 # More deterministic / focused
-python generate.py --checkpoint checkpoints/epoch_50.pt --prompt "Chapter 1 " \
+python generate.py --checkpoint checkpoints/small.pt --prompt "Chapter 1 " \
     --temperature 0.5 --top-k 20
 
 # Interactive chat-style loop
-python generate.py --checkpoint checkpoints/epoch_50.pt --interactive --top-p 0.9 --repetition-penalty 1.2
+python generate.py --checkpoint checkpoints/small.pt --interactive --top-p 0.9 --repetition-penalty 1.2
 
 # Point at a specific tokenizer
-python generate.py --checkpoint runs/alice_tiny/epoch_100.pt --tokenizer runs/alice_tiny/tokenizer.pkl --prompt "Alice "
+python generate.py --checkpoint runs/alice_tiny/tiny.pt --prompt "Alice "
 ```
 
 ---
@@ -212,13 +213,14 @@ VRAM tips:
 
 ## Checkpoints
 
-- Saved to `--checkpoint-dir` (default `checkpoints/`): `epoch_<n>.pt` each epoch,
-  `step_<n>.pt` periodically, `best_model.pt` on best validation loss, and
-  `epoch_<n>_interrupted.pt` on `Ctrl+C`.
-- The tokenizer is saved alongside as `tokenizer.pkl` — keep it with the
-  checkpoint; generation needs the matching tokenizer.
-- **Rotation:** only the newest few `epoch_*`/`step_*` are kept (default 3);
-  `best_model.pt` and `*interrupted*` are always preserved.
+- Saved to `--checkpoint-dir` (default `checkpoints/`): one rolling
+  `<name>_train.pt` while training, `<name>_best.pt` for the best validation
+  snapshot, and `<name>.pt` as the published final model.
+- The tokenizer is saved alongside as `tokenizer.pkl`. Published `<name>.pt`
+  models also embed the tokenizer, so generation can usually load them without
+  a separate `--tokenizer` argument.
+- On successful completion, `<name>_train.pt` is merged into `<name>.pt` and
+  deleted.
 - **Architecture note:** the model now uses RoPE + SwiGLU + RMSNorm.
   Checkpoints from before that change won't load on `main`; check out the
   `v0-legacy-arch` tag to use them, then `git checkout main` to return.
@@ -230,13 +232,13 @@ VRAM tips:
 **A. "I just want to see it work" (minutes)**
 ```bash
 python train.py --preset tiny --data data/alice.txt --char --epochs 50 --seq-len 128 --batch-size 32
-python generate.py --checkpoint checkpoints/epoch_50.pt --prompt "Alice " --top-p 0.9
+python generate.py --checkpoint checkpoints/tiny.pt --prompt "Alice " --top-p 0.9
 ```
 
 **B. "A decent model overnight on my 3060"**
 ```bash
 python train.py --preset small --data data/train_large.txt --vocab-size 8000 --epochs 20 --seq-len 384 --batch-size 12
-python generate.py --checkpoint checkpoints/best_model.pt --prompt "The " --max-tokens 300 --top-p 0.9 --repetition-penalty 1.2
+python generate.py --checkpoint checkpoints/small_best.pt --prompt "The " --max-tokens 300 --top-p 0.9 --repetition-penalty 1.2
 ```
 
 **C. "Train on my own text"**
@@ -247,7 +249,7 @@ python train.py --preset small --data path/to/my_corpus.txt --char --epochs 30 -
 
 **D. "Resume after Ctrl+C"**
 ```bash
-python train.py --preset small --data data/train_large.txt --char --epochs 20 --resume checkpoints/epoch_7_interrupted.pt
+python train.py --preset small --data data/train_large.txt --char --epochs 20 --resume checkpoints/small_train.pt
 ```
 
 ---

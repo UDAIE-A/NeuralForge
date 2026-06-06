@@ -17,7 +17,7 @@ NeuralForge is a GPT-style decoder-only transformer language model implemented e
 - **Rich sampling**: temperature, top-k, top-p (nucleus), and repetition penalty
 - **Visual dashboard**: Real-time training metrics, GPU stats, loss trends
 - **Auto validation split**: Holds out a slice of the data when none is given
-- **Checkpoint rotation**: Keeps the latest few checkpoints plus the best model
+- **Named model artifacts**: train to `<name>_train.pt`, publish `<name>.pt`, keep `<name>_best.pt`
 - **GPU-only**: CUDA required for training
 - **KV-cache**: Efficient autoregressive text generation
 
@@ -78,14 +78,14 @@ python train.py --preset small --data data/train.txt --epochs 100 --batch-size 6
 ### 4. Generate text
 
 ```bash
-python generate.py --checkpoint checkpoints/epoch_100.pt --prompt "Alice" --max-tokens 200
+python generate.py --checkpoint checkpoints/small.pt --prompt "Alice" --max-tokens 200
 
 # Better quality sampling: nucleus sampling + repetition penalty
-python generate.py --checkpoint checkpoints/epoch_100.pt --prompt "Alice" \
+python generate.py --checkpoint checkpoints/small.pt --prompt "Alice" \
     --max-tokens 200 --top-p 0.9 --repetition-penalty 1.2
 
 # Interactive mode
-python generate.py --checkpoint checkpoints/epoch_100.pt --interactive
+python generate.py --checkpoint checkpoints/small.pt --interactive
 ```
 
 ## Model Sizes
