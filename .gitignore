@@ -29,6 +29,10 @@ wheels/
 *.pt
 *.pth
 checkpoints/
+runs/
+
+# Logs
+*.log
 
 # Training data (large files)
 data/*.txt

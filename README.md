@@ -27,6 +27,23 @@ NeuralForge is a GPT-style decoder-only transformer language model implemented e
 reference for `train.py` and `generate.py`, runnable examples, sampling guide,
 recommended settings for 12 GB GPUs, best-use-case recipes, and troubleshooting.
 
+## NeuralForge Studio (Web UI)
+
+A professional, ChatGPT-style web interface with a **side-by-side** layout:
+chat with your model on one side, train/track/tune it on the other — all live.
+
+```bash
+pip install -r requirements.txt          # installs fastapi + uvicorn
+python -m webui.server                    # then open http://127.0.0.1:8000
+```
+
+- **Chat panel** — pick a checkpoint and generate, with token-by-token streaming
+  and live sampling controls (temperature, top-k, top-p, repetition penalty).
+- **Admin panel** — configure and launch training (preset, data, tokenizer,
+  epochs, seq-len, batch, lr…), then watch **live** loss curve, epoch/batch
+  progress, tokens/sec, ETA, best validation loss, and GPU utilization /
+  memory / temperature. Stop a run any time.
+
 ## Quick Start
 
 ### 1. Setup

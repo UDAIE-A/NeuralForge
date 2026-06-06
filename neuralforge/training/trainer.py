@@ -121,9 +121,17 @@ class Trainer:
         gradient_accumulation_steps: int = 1,
         compile_model: bool = True,
         keep_last: int = 3,
+        metrics_callback=None,
+        should_stop=None,
     ):
         self.model = model
         self.keep_last = keep_last
+        # Optional hooks for external monitoring/control (e.g. the web UI).
+        # metrics_callback(dict) is called each batch; should_stop() -> bool is
+        # checked each batch to allow a cooperative early stop.
+        self.metrics_callback = metrics_callback
+        self.should_stop = should_stop
+        self._stop_requested = False
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -317,7 +325,34 @@ class Trainer:
             
             # Print update every batch
             self._print_batch_update(epoch, num_epochs, batch_idx, avg_loss, lr, elapsed, batch_time, tokens_per_sec)
-            
+
+            # Push live metrics to any external listener (web UI)
+            if self.metrics_callback is not None:
+                gpu = get_gpu_stats()
+                total_b = total_batches
+                done = (epoch - 1) * total_b + batch_idx + 1
+                remaining = num_epochs * total_b - done
+                eta = (elapsed / max(batch_idx + 1, 1)) * remaining
+                self.metrics_callback({
+                    'epoch': epoch, 'num_epochs': num_epochs,
+                    'batch': batch_idx + 1, 'total_batches': total_b,
+                    'global_step': self.global_step,
+                    'loss': avg_loss, 'lr': lr,
+                    'tokens_per_sec': tokens_per_sec,
+                    'gpu_util': gpu.get('gpu_util', 0),
+                    'mem_used': gpu.get('mem_used', 0),
+                    'mem_total': gpu.get('mem_total', 0),
+                    'temp': gpu.get('temp', 0),
+                    'eta': eta, 'elapsed': elapsed,
+                })
+
+            # Cooperative early stop (web UI stop button)
+            if self.should_stop is not None and self.should_stop():
+                self._stop_requested = True
+                self.save_checkpoint(f"epoch_{epoch}_interrupted.pt")
+                print(f"\n  >> Stop requested - saved epoch_{epoch}_interrupted.pt")
+                break
+
             # Evaluation
             if self.global_step % self.eval_interval == 0 and self.val_loader:
                 val_loss = self.evaluate()
@@ -385,8 +420,20 @@ class Trainer:
         try:
             for epoch in range(1, num_epochs + 1):
                 train_loss = self.train_epoch(epoch, num_epochs)
+                if self._stop_requested:
+                    print("\n  Training stopped early by request.")
+                    break
                 self.save_checkpoint(f"epoch_{epoch}.pt")
-            
+                # Evaluate at the end of every epoch so best_model.pt is saved
+                # reliably even on short runs (step-based eval can never fire).
+                if self.val_loader:
+                    val_loss = self.evaluate()
+                    print(f"  Epoch {epoch} validation loss: {val_loss:.4f}")
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        self.save_checkpoint("best_model.pt")
+                    self.model.train()
+
             total_time = time.time() - self.train_start_time
             print()
             print("=" * 70)
