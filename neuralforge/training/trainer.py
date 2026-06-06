@@ -100,6 +100,7 @@ class Trainer:
         eval_interval: int = 500,
         save_interval: int = 1000,
         gradient_accumulation_steps: int = 1,
+        compile_model: bool = True,
     ):
         self.model = model
         self.config = config
@@ -116,8 +117,18 @@ class Trainer:
             raise RuntimeError("CUDA not available. This model requires a GPU for training.")
         self.device = torch.device("cuda")
         self.model.to(self.device)
-        
-        # Setup optimizer
+
+        # Optionally JIT-compile the model for a sizeable training speedup.
+        # Falls back to eager if the backend (Triton) isn't available.
+        if compile_model:
+            try:
+                self.model = torch.compile(self.model)
+                print("  Model compiled with torch.compile")
+            except Exception as e:
+                print(f"  torch.compile unavailable, running eager ({e})")
+
+        # Setup optimizer. Build it from the original module so the optimizer
+        # also works cleanly when the model is wrapped by torch.compile.
         self.optimizer = model.get_optimizer(config)
         
         # Setup scheduler. max_steps is a placeholder here because the epoch
@@ -375,11 +386,15 @@ class Trainer:
             print(f"  Resume:    python train.py --resume checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
             print("=" * 70)
     
+    def _unwrapped_model(self):
+        """Return the underlying module, unwrapping torch.compile if present."""
+        return getattr(self.model, '_orig_mod', self.model)
+
     def save_checkpoint(self, filename: str):
         """Save model checkpoint."""
         path = os.path.join(self.checkpoint_dir, filename)
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': self._unwrapped_model().state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': {'step_num': self.scheduler.step_num},
             'global_step': self.global_step,
@@ -390,7 +405,7 @@ class Trainer:
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self._unwrapped_model().load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.step_num = checkpoint['scheduler_state_dict']['step_num']
         self.global_step = checkpoint['global_step']
