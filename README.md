@@ -9,10 +9,15 @@ NeuralForge is a GPT-style decoder-only transformer language model implemented e
 ### Features
 
 - **Pure implementation**: No dependencies on existing model weights or architectures
-- **Scalable**: From 6M to 70B+ parameters
+- **Scalable**: From ~2M to 16B+ parameters
+- **Modern architecture**: Rotary position embeddings (RoPE), SwiGLU feed-forward, RMSNorm
 - **Dual tokenizers**: BPE tokenizer or fast character-level tokenizer
-- **Flash Attention**: Optimized attention for faster training
+- **Flash Attention**: SDPA `is_causal` fast path for faster training
+- **torch.compile**: JIT-compiled training by default (falls back to eager)
+- **Rich sampling**: temperature, top-k, top-p (nucleus), and repetition penalty
 - **Visual dashboard**: Real-time training metrics, GPU stats, loss trends
+- **Auto validation split**: Holds out a slice of the data when none is given
+- **Checkpoint rotation**: Keeps the latest few checkpoints plus the best model
 - **GPU-only**: CUDA required for training
 - **KV-cache**: Efficient autoregressive text generation
 
@@ -52,19 +57,27 @@ python train.py --preset small --data data/train.txt --epochs 100 --batch-size 6
 ```bash
 python generate.py --checkpoint checkpoints/epoch_100.pt --prompt "Alice" --max-tokens 200
 
+# Better quality sampling: nucleus sampling + repetition penalty
+python generate.py --checkpoint checkpoints/epoch_100.pt --prompt "Alice" \
+    --max-tokens 200 --top-p 0.9 --repetition-penalty 1.2
+
 # Interactive mode
 python generate.py --checkpoint checkpoints/epoch_100.pt --interactive
 ```
 
 ## Model Sizes
 
-| Preset | Parameters | d_model | n_heads | n_layers | d_ff | VRAM (approx) |
-|--------|------------|---------|---------|----------|------|---------------|
-| tiny   | ~6M        | 128     | 4       | 4        | 512  | ~2 GB         |
-| small  | ~7M        | 256     | 8       | 8        | 1024 | ~4 GB         |
-| base   | ~120M      | 768     | 12      | 12       | 3072 | ~8 GB         |
-| large  | ~350M      | 1024    | 16      | 24       | 4096 | ~12 GB        |
-| xl     | ~1.5B      | 2048    | 32      | 32       | 8192 | ~24 GB        |
+Parameter counts use each preset's default vocab size (the embedding scales
+with the actual tokenizer vocab at train time).
+
+| Preset | Parameters | d_model | n_heads | n_layers | d_ff  | VRAM (approx) |
+|--------|------------|---------|---------|----------|-------|---------------|
+| tiny   | ~2M        | 128     | 4       | 4        | 512   | ~2 GB         |
+| small  | ~12M       | 256     | 8       | 8        | 1024  | ~4 GB         |
+| base   | ~138M      | 768     | 12      | 12       | 3072  | ~8 GB         |
+| large  | ~435M      | 1024    | 16      | 24       | 4096  | ~12 GB        |
+| xl     | ~2.2B      | 2048    | 32      | 32       | 8192  | ~24 GB        |
+| xxl    | ~22B       | 4096    | 32      | 80       | 16384 | multi-GPU     |
 
 ## Tokenizers
 
@@ -86,7 +99,7 @@ python generate.py --checkpoint checkpoints/epoch_100.pt --interactive
 neuralforge/
 ├── core/
 │   ├── config.py          # Model configuration (tiny to xxl)
-│   └── model.py           # Transformer with Flash Attention
+│   └── model.py           # Transformer: RoPE, SwiGLU, RMSNorm, Flash Attention
 ├── tokenizer/
 │   ├── bpe.py             # BPE tokenizer from scratch
 │   └── char_tokenizer.py  # Character-level tokenizer
@@ -122,6 +135,10 @@ Real-time metrics during training:
 - [x] BPE tokenizer
 - [x] Character-level tokenizer
 - [x] Flash Attention
+- [x] Rotary position embeddings (RoPE)
+- [x] SwiGLU feed-forward + RMSNorm
+- [x] top-p / repetition-penalty sampling
+- [x] torch.compile training
 - [x] Visual training dashboard
 - [x] GPU-only training
 - [ ] Multi-GPU training
@@ -129,6 +146,23 @@ Real-time metrics during training:
 - [ ] Mixture of Experts for scaling
 - [ ] RLHF alignment
 - [ ] Instruction tuning
+
+## Checkpoint compatibility
+
+The model architecture changed (RoPE, SwiGLU, RMSNorm), so checkpoints
+trained before that switch cannot be loaded by the current code. The previous
+architecture is preserved at the `v0-legacy-arch` tag:
+
+```bash
+# Generate from old (pre-RoPE) checkpoints
+git checkout v0-legacy-arch
+
+# Return to the current architecture
+git checkout main
+```
+
+New checkpoints trained on `main` are the way forward and should produce
+better results.
 
 ## License
 
