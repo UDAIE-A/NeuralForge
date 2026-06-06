@@ -194,10 +194,14 @@ class NeuralForge(nn.Module):
         """
         B, T = idx.shape
         device = idx.device
-        
-        # Token and position embeddings
+
+        # Token and position embeddings. During cached generation only the new
+        # tokens are passed in, so positions must be offset by however much is
+        # already in the cache - otherwise every generated token would reuse
+        # position 0.
+        past_len = kv_caches[0][0].size(2) if kv_caches is not None else 0
         tok_emb = self.tok_emb(idx)
-        positions = torch.arange(0, T, dtype=torch.long, device=device).unsqueeze(0)
+        positions = torch.arange(past_len, past_len + T, dtype=torch.long, device=device).unsqueeze(0)
         pos_emb = self.pos_emb(positions)
         x = self.emb_dropout(tok_emb + pos_emb)
         
