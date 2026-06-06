@@ -53,7 +53,7 @@ class ModelConfig:
     
     @classmethod
     def tiny(cls) -> "ModelConfig":
-        """Tiny model (~10M params) for testing."""
+        """Tiny model (~2M params) for testing."""
         return cls(
             vocab_size=8000,
             d_model=128,
@@ -65,7 +65,7 @@ class ModelConfig:
     
     @classmethod
     def small(cls) -> "ModelConfig":
-        """Small model (~50M params) for initial training."""
+        """Small model (~11M params) for initial training."""
         return cls(
             vocab_size=16000,
             d_model=256,
@@ -77,7 +77,7 @@ class ModelConfig:
     
     @classmethod
     def base(cls) -> "ModelConfig":
-        """Base model (~250M params)."""
+        """Base model (~110M params)."""
         return cls(
             vocab_size=32000,
             d_model=768,
@@ -89,7 +89,7 @@ class ModelConfig:
     
     @classmethod
     def large(cls) -> "ModelConfig":
-        """Large model (~1B params)."""
+        """Large model (~340M params)."""
         return cls(
             vocab_size=32000,
             d_model=1024,
@@ -101,7 +101,7 @@ class ModelConfig:
     
     @classmethod
     def xl(cls) -> "ModelConfig":
-        """XL model (~8B params)."""
+        """XL model (~1.7B params)."""
         return cls(
             vocab_size=32000,
             d_model=2048,
@@ -113,7 +113,7 @@ class ModelConfig:
     
     @classmethod
     def xxl(cls) -> "ModelConfig":
-        """XXL model (~70B params)."""
+        """XXL model (~16B params)."""
         return cls(
             vocab_size=64000,
             d_model=4096,
