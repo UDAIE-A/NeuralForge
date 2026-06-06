@@ -58,15 +58,18 @@ class TextDataset(Dataset):
         
         # Get sequence
         chunk = self.tokens[start:end]
-        
-        # Pad if necessary
-        if len(chunk) < self.seq_len + 1:
-            chunk = chunk + [0] * (self.seq_len + 1 - len(chunk))
-        
+
+        # Pad if necessary. Inputs are padded with <pad> (0), but the matching
+        # targets are padded with -1 so cross_entropy(ignore_index=-1) skips
+        # them - otherwise the model would be trained to predict <pad>.
+        pad = self.seq_len + 1 - len(chunk)
+        x_ids = chunk[:-1] if pad <= 0 else chunk[:-1] + [0] * pad
+        y_ids = chunk[1:] if pad <= 0 else chunk[1:] + [-1] * pad
+
         # Input and target (shifted by 1)
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        
+        x = torch.tensor(x_ids[:self.seq_len], dtype=torch.long)
+        y = torch.tensor(y_ids[:self.seq_len], dtype=torch.long)
+
         return x, y
 
 
