@@ -38,17 +38,15 @@ class ModelConfig:
     @property
     def num_parameters(self) -> int:
         """Estimate total parameters."""
-        # Embedding
+        # Embedding (positions use RoPE, so no positional table)
         emb = self.vocab_size * self.d_model
-        # Positional
-        pos = self.max_seq_len * self.d_model
         # Per transformer block
         attn = 4 * self.d_model * self.d_model  # Q, K, V, O projections
         ffn = 2 * self.d_model * self.d_ff       # Two linear layers
         ln = 4 * self.d_model                     # Two layer norms (weight + bias)
         block = attn + ffn + ln
         # Output head (tied with embedding, so 0)
-        total = emb + pos + self.n_layers * block
+        total = emb + self.n_layers * block
         return total
     
     @classmethod

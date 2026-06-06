@@ -7,6 +7,22 @@ from typing import Optional, Tuple
 from .config import ModelConfig
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the two halves of the last dimension: (x1, x2) -> (-x2, x1)."""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary position embedding to (B, n_heads, T, d_head) tensor.
+
+    cos/sin are (T, d_head) and broadcast over batch and heads.
+    """
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+    return x * cos + rotate_half(x) * sin
+
+
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention with causal masking."""
     
@@ -29,15 +45,23 @@ class MultiHeadAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = x.shape
-        
+
         # Project to Q, K, V
         q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        
+
+        # Rotary position embedding on the new tokens' q/k before they enter
+        # the cache. RoPE is relative, so caching already-rotated keys is correct.
+        if rope is not None:
+            cos, sin = rope
+            q = apply_rotary(q, cos, sin)
+            k = apply_rotary(k, cos, sin)
+
         # Handle KV cache for efficient generation
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
@@ -110,12 +134,13 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Pre-norm architecture
         residual = x
         x = self.ln1(x)
-        attn_out, new_cache = self.attn(x, kv_cache)
+        attn_out, new_cache = self.attn(x, kv_cache, rope)
         x = residual + attn_out
         
         residual = x
@@ -129,17 +154,22 @@ class NeuralForge(nn.Module):
     """NeuralForge: A GPT-style decoder-only transformer.
     
     Built from scratch with no dependencies on external models.
-    Architecture: Token embedding + Positional embedding + Transformer blocks + LM head
+    Architecture: Token embedding + RoPE + Transformer blocks + LM head
     """
-    
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        
-        # Token and position embeddings
+
+        # Token embedding. Positions come from rotary embeddings (RoPE) applied
+        # inside attention, so there is no learned positional embedding table.
         self.tok_emb = nn.Embedding(config.vocab_size, config.d_model)
-        self.pos_emb = nn.Embedding(config.max_seq_len, config.d_model)
         self.emb_dropout = nn.Dropout(config.dropout)
+
+        # Rotary frequencies for RoPE (d_head must be even).
+        assert config.d_head % 2 == 0, "d_head must be even for rotary embeddings"
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, config.d_head, 2).float() / config.d_head))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         
         # Transformer blocks
         self.blocks = nn.ModuleList([
@@ -182,7 +212,15 @@ class NeuralForge(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             torch.nn.init.ones_(module.weight)
             torch.nn.init.zeros_(module.bias)
-    
+
+    def _rope(self, seq_len: int, offset: int, device, dtype):
+        """Build (cos, sin) of shape (seq_len, d_head) for positions
+        [offset, offset+seq_len)."""
+        t = torch.arange(offset, offset + seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)            # (seq_len, d_head/2)
+        emb = torch.cat((freqs, freqs), dim=-1)          # (seq_len, d_head)
+        return emb.cos().to(dtype), emb.sin().to(dtype)
+
     def forward(
         self,
         idx: torch.Tensor,
@@ -207,21 +245,19 @@ class NeuralForge(nn.Module):
         B, T = idx.shape
         device = idx.device
 
-        # Token and position embeddings. During cached generation only the new
-        # tokens are passed in, so positions must be offset by however much is
-        # already in the cache - otherwise every generated token would reuse
-        # position 0.
+        # During cached generation only the new tokens are passed in, so RoPE
+        # positions must be offset by however much is already in the cache.
         past_len = kv_caches[0][0].size(2) if kv_caches is not None else 0
-        tok_emb = self.tok_emb(idx)
-        positions = torch.arange(past_len, past_len + T, dtype=torch.long, device=device).unsqueeze(0)
-        pos_emb = self.pos_emb(positions)
-        x = self.emb_dropout(tok_emb + pos_emb)
-        
+        x = self.emb_dropout(self.tok_emb(idx))
+
+        # Rotary cos/sin for the current tokens' absolute positions.
+        rope = self._rope(T, past_len, device, x.dtype)
+
         # Transformer blocks
         new_caches = []
         for i, block in enumerate(self.blocks):
             cache = kv_caches[i] if kv_caches is not None else None
-            x, new_cache = block(x, cache)
+            x, new_cache = block(x, cache, rope)
             if use_cache:
                 new_caches.append(new_cache)
         
