@@ -58,11 +58,15 @@ def main():
     )
     print(f"Loading tokenizer: {tokenizer_path}")
     
-    # Try char tokenizer first, fall back to BPE
-    try:
+    # Detect tokenizer type from the saved contents rather than relying on a
+    # load failure: char tokenizers store 'char_to_id', BPE stores 'merges'.
+    import pickle
+    with open(tokenizer_path, 'rb') as f:
+        tok_data = pickle.load(f)
+    if 'char_to_id' in tok_data:
         tokenizer = CharTokenizer.load(tokenizer_path)
         print("  (character-level tokenizer)")
-    except (KeyError, Exception):
+    else:
         tokenizer = BPETokenizer.load(tokenizer_path)
         print("  (BPE tokenizer)")
     
