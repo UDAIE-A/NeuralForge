@@ -47,7 +47,9 @@ def main():
                        help='Resume from checkpoint')
     parser.add_argument('--char', action='store_true',
                        help='Use character-level tokenizer (fast, no BPE training)')
-    
+    parser.add_argument('--no-compile', action='store_true',
+                       help='Disable torch.compile (auto-skipped if Triton is missing)')
+
     args = parser.parse_args()
     
     # GPU check
@@ -113,6 +115,7 @@ def main():
         model=model, config=config,
         train_loader=train_loader, val_loader=val_loader,
         checkpoint_dir=args.checkpoint_dir,
+        compile_model=not args.no_compile,
     )
     
     if args.resume:

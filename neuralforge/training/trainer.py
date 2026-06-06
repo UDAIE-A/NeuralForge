@@ -7,6 +7,7 @@ import sys
 import time
 import math
 import glob
+import importlib.util
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any, List
@@ -139,13 +140,18 @@ class Trainer:
         self.model.to(self.device)
 
         # Optionally JIT-compile the model for a sizeable training speedup.
-        # Falls back to eager if the backend (Triton) isn't available.
-        if compile_model:
+        # torch.compile needs Triton (often missing on Windows), so skip it
+        # when Triton isn't installed - otherwise the first step stalls trying
+        # to compile. Everything else (incl. FlashAttention SDPA) runs fine
+        # in eager mode.
+        if compile_model and importlib.util.find_spec("triton") is not None:
             try:
                 self.model = torch.compile(self.model)
                 print("  Model compiled with torch.compile")
             except Exception as e:
                 print(f"  torch.compile unavailable, running eager ({e})")
+        elif compile_model:
+            print("  torch.compile skipped (Triton not installed); running eager")
 
         # Setup optimizer. Build it from the original module so the optimizer
         # also works cleanly when the model is wrapped by torch.compile.
