@@ -45,23 +45,33 @@ class MultiHeadAttention(nn.Module):
             v = torch.cat([v_cache, v], dim=2)
         
         new_cache = (k, v)
-        
-        # Compute attention scores
-        scale = math.sqrt(self.d_head)
-        
-        # Use Flash Attention for speed
+
         T_q = q.shape[2]
         T_k = k.shape[2]
-        
-        # Create causal mask for flash attention
-        causal_mask = torch.tril(torch.ones(T_q, T_k, device=x.device, dtype=torch.bool))
-        
-        att = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=causal_mask,
-            dropout_p=self.dropout_p if self.training else 0,
-            is_causal=False
-        )
+        dropout_p = self.dropout_p if self.training else 0
+
+        # Prefer the is_causal fast path - it lets SDPA dispatch to the
+        # FlashAttention kernel without materializing a mask. is_causal aligns
+        # the triangle to the top-left, which is only correct when query and
+        # key lengths match (training, or the first generation step). During
+        # incremental decoding T_q==1 and the single query must see every
+        # cached key, so no mask is needed there either.
+        if T_q == T_k:
+            att = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=dropout_p, is_causal=True
+            )
+        elif T_q == 1:
+            att = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=dropout_p, is_causal=False
+            )
+        else:
+            # Multi-token step with a non-empty cache: build an offset causal
+            # mask so each new query attends to the cache plus earlier new tokens.
+            offset = T_k - T_q
+            causal_mask = torch.ones(T_q, T_k, device=x.device, dtype=torch.bool).tril(diagonal=offset)
+            att = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=causal_mask, dropout_p=dropout_p, is_causal=False
+            )
         
         out = att.transpose(1, 2).contiguous().view(B, T, C)
         out = self.resid_dropout(self.o_proj(out))
