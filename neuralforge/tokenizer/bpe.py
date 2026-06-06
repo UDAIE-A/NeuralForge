@@ -1,183 +1,141 @@
 """
-Byte Pair Encoding (BPE) Tokenizer - Implemented from scratch.
-
-This tokenizer learns subword units from training data, similar to how
-GPT-2 and other modern language models tokenize text.
+Byte Pair Encoding (BPE) Tokenizer - Fast implementation.
 """
 
 import re
-import json
 import os
 import time
 from collections import Counter, defaultdict
 from typing import List, Dict, Optional, Tuple
 import pickle
+import heapq
 
 
 class BPETokenizer:
-    """
-    Byte Pair Encoding tokenizer.
-    
-    Learns a vocabulary of subword tokens from training data.
-    Starts with individual bytes and merges the most frequent pairs.
-    """
+    """Fast BPE tokenizer."""
     
     def __init__(self):
         self.merges: List[Tuple[str, str]] = []
         self.vocab: Dict[str, int] = {}
         self.inverse_vocab: Dict[int, str] = {}
-        self.special_tokens = {
-            '<pad>': 0,
-            '<bos>': 1,
-            '<eos>': 2,
-            '<unk>': 3,
-        }
+        self.special_tokens = {'<pad>': 0, '<bos>': 1, '<eos>': 2, '<unk>': 3}
         self.is_trained = False
     
-    def _get_stats(self, ids: List[List[str]]) -> Dict[Tuple[str, str], int]:
-        """Count frequency of adjacent pairs."""
+    def _get_stats_fast(self, corpus: List[Tuple[str, ...]]) -> Counter:
+        """Count pair frequencies efficiently."""
         counts = Counter()
-        for word_ids in ids:
-            for i in range(len(word_ids) - 1):
-                pair = (word_ids[i], word_ids[i + 1])
-                counts[pair] += 1
+        for word in corpus:
+            for i in range(len(word) - 1):
+                counts[(word[i], word[i + 1])] += 1
         return counts
     
-    def _merge(self, ids: List[str], pair: Tuple[str, str]) -> List[str]:
-        """Merge all occurrences of pair in the token list."""
-        new_ids = []
-        i = 0
-        while i < len(ids):
-            if i < len(ids) - 1 and ids[i] == pair[0] and ids[i + 1] == pair[1]:
-                new_ids.append(pair[0] + pair[1])
-                i += 2
-            else:
-                new_ids.append(ids[i])
-                i += 1
-        return new_ids
+    def _merge_pair(self, corpus: List[Tuple[str, ...]], pair: Tuple[str, str]) -> List[Tuple[str, ...]]:
+        """Merge a pair in all words."""
+        new_corpus = []
+        a, b = pair
+        for word in corpus:
+            new_word = []
+            i = 0
+            while i < len(word):
+                if i < len(word) - 1 and word[i] == a and word[i + 1] == b:
+                    new_word.append(a + b)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            new_corpus.append(tuple(new_word))
+        return new_corpus
     
     def _build_vocab(self):
         """Build vocabulary from learned merges."""
-        # Start with byte-level characters (0-255)
         vocab = {bytes([i]).decode('latin-1'): i for i in range(256)}
-        
-        # Add special tokens
         for token, idx in self.special_tokens.items():
             vocab[token] = 256 + idx
-        
-        # Add merged tokens
         offset = 256 + len(self.special_tokens)
         for i, (first, second) in enumerate(self.merges):
             merged = first + second
             if merged not in vocab:
                 vocab[merged] = offset + i
-        
         self.vocab = vocab
         self.inverse_vocab = {v: k for k, v in vocab.items()}
     
     def train(self, text: str, vocab_size: int = 32000, verbose: bool = False):
-        """
-        Train BPE tokenizer on text.
-        
-        Args:
-            text: Training text
-            vocab_size: Target vocabulary size (including byte tokens and special tokens)
-            verbose: Print training progress
-        """
+        """Train BPE tokenizer on text."""
         if verbose:
-            print(f"Training BPE tokenizer on {len(text)} characters...")
+            print(f"  Training BPE on {len(text):,} characters...")
         
-        # Split into words (simple whitespace + punctuation splitting)
-        # Each word becomes a list of byte characters
+        t0 = time.time()
+        
+        # Split into words
         words = re.findall(r'\S+', text.lower())
         
-        # Convert each word to list of byte characters
+        # Convert to tuples of byte characters
         corpus = []
         for word in words:
-            word_bytes = [bytes([b]).decode('latin-1') for b in word.encode('utf-8')]
+            word_bytes = tuple(bytes([b]).decode('latin-1') for b in word.encode('utf-8'))
             corpus.append(word_bytes)
         
-        # Calculate number of merges needed
-        # 256 byte tokens + 4 special tokens + N merges = vocab_size
+        if verbose:
+            print(f"  Tokenized into {len(corpus):,} words in {time.time()-t0:.1f}s")
+        
         num_merges = vocab_size - 256 - len(self.special_tokens)
-        
         self.merges = []
-        merge_start = time.time()
         
+        t0 = time.time()
         for i in range(num_merges):
-            # Count all adjacent pairs
-            stats = self._get_stats(corpus)
-            
+            stats = self._get_stats_fast(corpus)
             if not stats:
-                if verbose:
-                    print(f"No more pairs to merge after {i} merges")
                 break
             
-            # Find most frequent pair
             best_pair = max(stats, key=stats.get)
             best_count = stats[best_pair]
             
             if best_count < 2:
-                if verbose:
-                    print(f"Best pair frequency < 2 after {i} merges, stopping")
                 break
             
-            # Merge this pair everywhere in corpus
-            corpus = [self._merge(word_ids, best_pair) for word_ids in corpus]
-            
+            corpus = self._merge_pair(corpus, best_pair)
             self.merges.append(best_pair)
             
-            if verbose and (i + 1) % 100 == 0:
-                elapsed = time.time() - merge_start
+            if verbose and (i + 1) % 500 == 0:
+                elapsed = time.time() - t0
                 per_merge = elapsed / (i + 1)
-                remaining = per_merge * (num_merges - i - 1)
+                eta = per_merge * (num_merges - i - 1) / 60
                 merged = best_pair[0] + best_pair[1]
                 merged = ''.join(c if c.isprintable() else '?' for c in merged)
-                print(f"  Merge {i+1}/{num_merges}: {merged} (freq: {best_count}) | {per_merge:.1f}s/merge | ETA: {remaining/60:.1f}min")
+                print(f"    Merge {i+1}/{num_merges}: {merged} | ETA: {eta:.1f}min")
         
-        # Build vocabulary
         self._build_vocab()
         self.is_trained = True
         
         if verbose:
-            print(f"Tokenizer trained: {len(self.vocab)} tokens, {len(self.merges)} merges")
+            print(f"  Tokenizer done: {len(self.vocab)} tokens in {time.time()-t0:.1f}s")
     
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
-        """
-        Encode text to token IDs.
-        
-        Args:
-            text: Input text
-            add_special_tokens: Add BOS/EOS tokens
-            
-        Returns:
-            List of token IDs
-        """
+        """Encode text to token IDs."""
         if not self.is_trained:
             raise RuntimeError("Tokenizer must be trained before encoding")
         
         tokens = []
-        
         if add_special_tokens:
             tokens.append(self.special_tokens['<bos>'])
         
-        # Process each word
         words = re.findall(r'\S+', text.lower())
-        
         for word in words:
-            # Convert to byte characters
             word_bytes = [bytes([b]).decode('latin-1') for b in word.encode('utf-8')]
-            
-            # Apply learned merges
             for first, second in self.merges:
-                word_bytes = self._merge(word_bytes, (first, second))
+                new_bytes = []
+                j = 0
+                while j < len(word_bytes):
+                    if j < len(word_bytes) - 1 and word_bytes[j] == first and word_bytes[j + 1] == second:
+                        new_bytes.append(first + second)
+                        j += 2
+                    else:
+                        new_bytes.append(word_bytes[j])
+                        j += 1
+                word_bytes = new_bytes
             
-            # Convert to IDs
             for token in word_bytes:
-                if token in self.vocab:
-                    tokens.append(self.vocab[token])
-                else:
-                    tokens.append(self.special_tokens['<unk>'])
+                tokens.append(self.vocab.get(token, self.special_tokens['<unk>']))
         
         if add_special_tokens:
             tokens.append(self.special_tokens['<eos>'])
@@ -185,15 +143,7 @@ class BPETokenizer:
         return tokens
     
     def decode(self, ids: List[int]) -> str:
-        """
-        Decode token IDs to text.
-        
-        Args:
-            ids: List of token IDs
-            
-        Returns:
-            Decoded text
-        """
+        """Decode token IDs to text."""
         if not self.is_trained:
             raise RuntimeError("Tokenizer must be trained before decoding")
         
@@ -201,15 +151,12 @@ class BPETokenizer:
         for id in ids:
             if id in self.inverse_vocab:
                 token = self.inverse_vocab[id]
-                # Skip special tokens in output
                 if token not in self.special_tokens:
                     tokens.append(token)
             else:
                 tokens.append('<unk>')
         
-        # Join and clean up
         text = ''.join(tokens)
-        # Try to decode as UTF-8
         try:
             text_bytes = text.encode('latin-1')
             text = text_bytes.decode('utf-8')
@@ -220,29 +167,26 @@ class BPETokenizer:
     
     def save(self, path: str):
         """Save tokenizer to file."""
-        data = {
-            'merges': self.merges,
-            'vocab': self.vocab,
-            'special_tokens': self.special_tokens,
-            'is_trained': self.is_trained,
-        }
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
         with open(path, 'wb') as f:
-            pickle.dump(data, f)
+            pickle.dump({
+                'merges': self.merges,
+                'vocab': self.vocab,
+                'special_tokens': self.special_tokens,
+                'is_trained': self.is_trained,
+            }, f)
     
     @classmethod
     def load(cls, path: str) -> 'BPETokenizer':
         """Load tokenizer from file."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
-        
         tokenizer = cls()
         tokenizer.merges = data['merges']
         tokenizer.vocab = data['vocab']
         tokenizer.special_tokens = data['special_tokens']
         tokenizer.is_trained = data['is_trained']
         tokenizer.inverse_vocab = {v: k for k, v in tokenizer.vocab.items()}
-        
         return tokenizer
     
     def __len__(self) -> int:
