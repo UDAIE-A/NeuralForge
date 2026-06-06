@@ -125,6 +125,11 @@ def create_dataloaders(
     if effective_batch_size < batch_size:
         print(f"  Warning: batch_size {batch_size} > dataset size {len(train_dataset)}, using {effective_batch_size}")
     
+    # persistent_workers/prefetch_factor are only valid with worker processes.
+    worker_kwargs = (
+        {'persistent_workers': True, 'prefetch_factor': 4} if num_workers > 0 else {}
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=effective_batch_size,
@@ -132,8 +137,7 @@ def create_dataloaders(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
-        persistent_workers=True,
-        prefetch_factor=4
+        **worker_kwargs
     )
     
     val_loader = None
