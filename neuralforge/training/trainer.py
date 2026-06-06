@@ -120,12 +120,12 @@ class Trainer:
         # Setup optimizer
         self.optimizer = model.get_optimizer(config)
         
-        # Setup scheduler
-        total_steps = len(train_loader) * config.warmup_steps
+        # Setup scheduler. max_steps is a placeholder here because the epoch
+        # count isn't known until train() is called - it gets set there.
         self.scheduler = CosineScheduleWithWarmup(
             self.optimizer,
             warmup_steps=config.warmup_steps,
-            max_steps=total_steps
+            max_steps=len(train_loader)
         )
         
         # Mixed precision
@@ -332,6 +332,12 @@ class Trainer:
     def train(self, num_epochs: int = 10):
         """Full training loop."""
         self.train_start_time = time.time()
+
+        # Now that we know how many epochs we're running, size the LR decay to
+        # the real number of optimizer steps so cosine decay actually completes.
+        optimizer_steps = len(self.train_loader) * num_epochs // self.gradient_accumulation_steps
+        self.scheduler.max_steps = max(self.scheduler.warmup_steps + 1, optimizer_steps)
+
         estimated_time = self._estimate_time(num_epochs)
         self._print_header(num_epochs, estimated_time)
         
