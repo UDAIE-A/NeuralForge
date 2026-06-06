@@ -103,32 +103,44 @@ class MultiHeadAttention(nn.Module):
         return out, new_cache
 
 
+class RMSNorm(nn.Module):
+    """Root-mean-square layer normalization (no mean subtraction, no bias)."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm.type_as(x) * self.weight
+
+
 class FeedForward(nn.Module):
-    """Position-wise feed-forward network with GELU activation."""
-    
+    """SwiGLU feed-forward network (gated SiLU), as used in LLaMA."""
+
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.fc1 = nn.Linear(config.d_model, config.d_ff)
-        self.fc2 = nn.Linear(config.d_ff, config.d_model)
+        self.gate_proj = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.up_proj = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.down_proj = nn.Linear(config.d_ff, config.d_model, bias=False)
         self.dropout = nn.Dropout(config.dropout)
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
+        x = F.silu(self.gate_proj(x)) * self.up_proj(x)
+        x = self.down_proj(x)
         x = self.dropout(x)
         return x
 
 
 class TransformerBlock(nn.Module):
     """Single transformer block with pre-norm architecture."""
-    
+
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(config.d_model)
+        self.ln1 = RMSNorm(config.d_model)
         self.attn = MultiHeadAttention(config)
-        self.ln2 = nn.LayerNorm(config.d_model)
+        self.ln2 = RMSNorm(config.d_model)
         self.ffn = FeedForward(config)
     
     def forward(
@@ -177,7 +189,7 @@ class NeuralForge(nn.Module):
         ])
         
         # Final layer norm
-        self.ln_f = nn.LayerNorm(config.d_model)
+        self.ln_f = RMSNorm(config.d_model)
         
         # Language model head (weight tied with token embedding)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -194,7 +206,7 @@ class NeuralForge(nn.Module):
         # in deep models.
         residual_scale = (2 * config.n_layers) ** -0.5
         for name, param in self.named_parameters():
-            if name.endswith('o_proj.weight') or name.endswith('fc2.weight'):
+            if name.endswith('o_proj.weight') or name.endswith('down_proj.weight'):
                 torch.nn.init.normal_(param, mean=0.0, std=0.02 * residual_scale)
 
         # Print parameter count

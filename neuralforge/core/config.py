@@ -42,8 +42,8 @@ class ModelConfig:
         emb = self.vocab_size * self.d_model
         # Per transformer block
         attn = 4 * self.d_model * self.d_model  # Q, K, V, O projections
-        ffn = 2 * self.d_model * self.d_ff       # Two linear layers
-        ln = 4 * self.d_model                     # Two layer norms (weight + bias)
+        ffn = 3 * self.d_model * self.d_ff       # SwiGLU: gate, up, down
+        ln = 2 * self.d_model                     # Two RMSNorms (weight only)
         block = attn + ffn + ln
         # Output head (tied with embedding, so 0)
         total = emb + self.n_layers * block
