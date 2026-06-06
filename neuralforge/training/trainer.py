@@ -61,10 +61,23 @@ def make_bar(progress: float, width: int = 30, fill: str = "#", empty: str = "-"
     return f"[{bar}]"
 
 
-def get_gpu_stats() -> Dict[str, float]:
-    """Get GPU memory and utilization stats."""
+_gpu_stats_cache: Dict[str, Any] = {'time': 0.0, 'stats': {}}
+
+
+def get_gpu_stats(min_interval: float = 2.0) -> Dict[str, float]:
+    """Get GPU memory and utilization stats.
+
+    Shelling out to nvidia-smi every batch is expensive (a process spawn per
+    step), so the result is cached and only refreshed every min_interval
+    seconds.
+    """
     if not torch.cuda.is_available():
         return {}
+
+    now = time.time()
+    if now - _gpu_stats_cache['time'] < min_interval and _gpu_stats_cache['stats']:
+        return _gpu_stats_cache['stats']
+
     try:
         import subprocess
         result = subprocess.run(
@@ -74,16 +87,20 @@ def get_gpu_stats() -> Dict[str, float]:
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split(', ')
-            return {
+            stats = {
                 'gpu_util': float(parts[0]),
                 'mem_used': float(parts[1]),
                 'mem_total': float(parts[2]),
                 'temp': float(parts[3]),
             }
+            _gpu_stats_cache.update(time=now, stats=stats)
+            return stats
     except Exception:
         pass
     mem_used = torch.cuda.memory_allocated() / 1024**2
-    return {'gpu_util': 0, 'mem_used': mem_used, 'mem_total': 0, 'temp': 0}
+    stats = {'gpu_util': 0, 'mem_used': mem_used, 'mem_total': 0, 'temp': 0}
+    _gpu_stats_cache.update(time=now, stats=stats)
+    return stats
 
 
 class Trainer:
