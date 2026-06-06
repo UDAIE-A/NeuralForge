@@ -21,6 +21,12 @@ NeuralForge is a GPT-style decoder-only transformer language model implemented e
 - **GPU-only**: CUDA required for training
 - **KV-cache**: Efficient autoregressive text generation
 
+## Documentation
+
+📖 **[Full Usage Guide → docs/USAGE.md](docs/USAGE.md)** — complete argument
+reference for `train.py` and `generate.py`, runnable examples, sampling guide,
+recommended settings for 12 GB GPUs, best-use-case recipes, and troubleshooting.
+
 ## Quick Start
 
 ### 1. Setup
