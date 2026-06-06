@@ -8,6 +8,7 @@ GPT-2 and other modern language models tokenize text.
 import re
 import json
 import os
+import time
 from collections import Counter, defaultdict
 from typing import List, Dict, Optional, Tuple
 import pickle
@@ -101,6 +102,7 @@ class BPETokenizer:
         num_merges = vocab_size - 256 - len(self.special_tokens)
         
         self.merges = []
+        merge_start = time.time()
         
         for i in range(num_merges):
             # Count all adjacent pairs
@@ -126,9 +128,12 @@ class BPETokenizer:
             self.merges.append(best_pair)
             
             if verbose and (i + 1) % 100 == 0:
+                elapsed = time.time() - merge_start
+                per_merge = elapsed / (i + 1)
+                remaining = per_merge * (num_merges - i - 1)
                 merged = best_pair[0] + best_pair[1]
                 merged = ''.join(c if c.isprintable() else '?' for c in merged)
-                print(f"Merge {i+1}/{num_merges}: {merged} (freq: {best_count})")
+                print(f"  Merge {i+1}/{num_merges}: {merged} (freq: {best_count}) | {per_merge:.1f}s/merge | ETA: {remaining/60:.1f}min")
         
         # Build vocabulary
         self._build_vocab()
