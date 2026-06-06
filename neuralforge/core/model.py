@@ -157,7 +157,16 @@ class NeuralForge(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
-        
+
+        # GPT-2 style scaled init for the residual projections: with N blocks
+        # the residual stream accumulates 2*N contributions, so scale those
+        # output projections by 1/sqrt(2*N) to keep activation variance stable
+        # in deep models.
+        residual_scale = (2 * config.n_layers) ** -0.5
+        for name, param in self.named_parameters():
+            if name.endswith('o_proj.weight') or name.endswith('fc2.weight'):
+                torch.nn.init.normal_(param, mean=0.0, std=0.02 * residual_scale)
+
         # Print parameter count
         n_params = sum(p.numel() for p in self.parameters())
         print(f"NeuralForge initialized: {n_params/1e6:.2f}M parameters")
