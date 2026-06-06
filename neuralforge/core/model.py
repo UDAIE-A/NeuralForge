@@ -25,13 +25,6 @@ class MultiHeadAttention(nn.Module):
         
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        
-        # Causal mask
-        self.register_buffer(
-            "mask",
-            torch.tril(torch.ones(config.max_seq_len, config.max_seq_len))
-            .view(1, 1, config.max_seq_len, config.max_seq_len)
-        )
     
     def forward(
         self,
