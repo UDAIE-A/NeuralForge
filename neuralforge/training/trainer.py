@@ -169,27 +169,31 @@ class Trainer:
         self.train_start_time = None
     
     def _estimate_time(self, num_epochs: int) -> float:
-        """Run 1 batch to estimate total training time."""
+        """Time a forward+backward pass to estimate total training time.
+
+        Deliberately does NOT call the optimizer/scaler step, so the real
+        weights and optimizer state are left untouched - the old version
+        actually trained on this batch before the loop started.
+        """
         print("  Estimating training time...")
         self.model.train()
         x, y = next(iter(self.train_loader))
         x = x.to(self.device)
         y = y.to(self.device)
-        
+
         torch.cuda.synchronize()
         start = time.time()
-        
+
         with torch.amp.autocast('cuda'):
             logits, loss, _ = self.model(x, targets=y)
         self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad()
-        
+
         torch.cuda.synchronize()
         batch_time = time.time() - start
+
+        # Discard the gradients from this timing pass so the first real step
+        # starts clean.
+        self.optimizer.zero_grad(set_to_none=True)
         
         total_batches = len(self.train_loader) * num_epochs
         estimated = batch_time * total_batches
