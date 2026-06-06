@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import math
+import glob
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any, List
@@ -118,8 +119,10 @@ class Trainer:
         save_interval: int = 1000,
         gradient_accumulation_steps: int = 1,
         compile_model: bool = True,
+        keep_last: int = 3,
     ):
         self.model = model
+        self.keep_last = keep_last
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -422,6 +425,25 @@ class Trainer:
             'best_val_loss': self.best_val_loss,
             'config': self.config,
         }, path)
+        self._prune_checkpoints()
+
+    def _prune_checkpoints(self):
+        """Keep only the newest `keep_last` rotating checkpoints.
+
+        best_model.pt and *interrupted* checkpoints are always preserved; only
+        the routine epoch_*/step_* snapshots are rotated.
+        """
+        if not self.keep_last or self.keep_last <= 0:
+            return
+        for pattern in ('epoch_*.pt', 'step_*.pt'):
+            files = glob.glob(os.path.join(self.checkpoint_dir, pattern))
+            files = [f for f in files if 'interrupted' not in os.path.basename(f)]
+            files.sort(key=os.path.getmtime)
+            for stale in files[:-self.keep_last]:
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
     
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
