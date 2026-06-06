@@ -369,7 +369,8 @@ class Trainer:
             print("=" * 70)
             print(f"  Time:      {format_time(total_time)}")
             print(f"  Steps:     {self.global_step}")
-            print(f"  Last loss: {self.epoch_losses[-1]:.4f if self.epoch_losses else 'N/A'}")
+            last_loss = f"{self.epoch_losses[-1]:.4f}" if self.epoch_losses else "N/A"
+            print(f"  Last loss: {last_loss}")
             print(f"  Saved:     checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
             print(f"  Resume:    python train.py --resume checkpoints/epoch_{len(self.epoch_losses)}_interrupted.pt")
             print("=" * 70)
