@@ -20,6 +20,7 @@ class BPETokenizer:
         self.inverse_vocab: Dict[int, str] = {}
         self.special_tokens = {'<pad>': 0, '<bos>': 1, '<eos>': 2, '<unk>': 3}
         self.is_trained = False
+        self.space_id = None
     
     def _get_stats_fast(self, corpus: List[Tuple[str, ...]]) -> Counter:
         """Count pair frequencies efficiently."""
@@ -58,6 +59,7 @@ class BPETokenizer:
                 vocab[merged] = offset + i
         self.vocab = vocab
         self.inverse_vocab = {v: k for k, v in vocab.items()}
+        self.space_id = self.vocab.get(' ')
     
     def train(self, text: str, vocab_size: int = 32000, verbose: bool = False):
         """Train BPE tokenizer on text."""
@@ -68,12 +70,17 @@ class BPETokenizer:
         
         # Split into words
         words = re.findall(r'\S+', text.lower())
-        
-        # Convert to tuples of byte characters
+
+        # Convert to tuples of byte characters. A space token is inserted
+        # BETWEEN words so the model can learn and reproduce word boundaries
+        # (otherwise decoded text has no spaces, e.g. "thesunisastar").
         corpus = []
         for word in words:
             word_bytes = tuple(bytes([b]).decode('latin-1') for b in word.encode('utf-8'))
             corpus.append(word_bytes)
+            corpus.append((' ',))  # word separator token
+        if corpus:
+            corpus = corpus[:-1]  # drop trailing separator
         
         if verbose:
             print(f"  Tokenized into {len(corpus):,} words in {time.time()-t0:.1f}s")
@@ -120,7 +127,7 @@ class BPETokenizer:
             tokens.append(self.special_tokens['<bos>'])
         
         words = re.findall(r'\S+', text.lower())
-        for word in words:
+        for wi, word in enumerate(words):
             word_bytes = [bytes([b]).decode('latin-1') for b in word.encode('utf-8')]
             for first, second in self.merges:
                 new_bytes = []
@@ -133,9 +140,11 @@ class BPETokenizer:
                         new_bytes.append(word_bytes[j])
                         j += 1
                 word_bytes = new_bytes
-            
+
             for token in word_bytes:
                 tokens.append(self.vocab.get(token, self.special_tokens['<unk>']))
+            if wi != len(words) - 1 and self.space_id is not None:
+                tokens.append(self.space_id)
         
         if add_special_tokens:
             tokens.append(self.special_tokens['<eos>'])
@@ -187,6 +196,7 @@ class BPETokenizer:
         tokenizer.special_tokens = data['special_tokens']
         tokenizer.is_trained = data['is_trained']
         tokenizer.inverse_vocab = {v: k for k, v in tokenizer.vocab.items()}
+        tokenizer.space_id = tokenizer.vocab.get(' ')
         return tokenizer
     
     def __len__(self) -> int:

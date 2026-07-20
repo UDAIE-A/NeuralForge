@@ -44,6 +44,37 @@ python -m webui.server                    # then open http://127.0.0.1:8000
   progress, tokens/sec, ETA, best validation loss, and GPU utilization /
   memory / temperature. Stop a run any time.
 
+## NeuralForge Learn (live, human-in-the-loop learning)
+
+Teach the model *during* a conversation. Every reaction you give — approve,
+reject, or a corrected answer — becomes a few gradient steps that nudge the
+model toward what you want, immediately. No big dataset, no offline run needed.
+
+**CLI**
+
+```bash
+# Interactive teaching chat (GPU, small model)
+python learn.py --checkpoint checkpoints/small.pt --interactive
+
+# Scripted self-test: proves the model learns from basic human interactions
+python learn.py --checkpoint checkpoints/small.pt --test
+```
+
+In the interactive session, after each reply type `y` (approve), `n` (reject,
+then optionally a fix), `<text>` (teach that better answer), or `s` (skip).
+All interactions are logged to `checkpoints/feedback.jsonl` and can be exported
+with `--export data/learned_interactions.txt` for a full offline training run.
+
+**Web UI**
+
+In NeuralForge Studio, each assistant reply has a feedback toolbar (👍 approve,
+👎 reject, ✏ correct). Reacting runs live gradient steps on the selected model;
+the **Live Learning** card shows interactions/steps and last loss, and can
+**Save** the learned weights or **Export** the corpus.
+
+See `neuralforge/learning/online.py` for the `OnlineLearner` implementation
+(`teach` / `approve` / `reject` primitives, masked next-token loss, JSONL store).
+
 ## Quick Start
 
 ### 1. Setup
@@ -160,9 +191,10 @@ Real-time metrics during training:
 - [x] Flash Attention
 - [x] Rotary position embeddings (RoPE)
 - [x] SwiGLU feed-forward + RMSNorm
-- [x] top-p / repetition-penalty sampling
-- [x] torch.compile training
-- [x] Visual training dashboard
+ - [x] top-p / repetition-penalty sampling
+ - [x] torch.compile training
+ - [x] Visual training dashboard
+ - [x] Live online fine-tuning (NeuralForge Learn)
 - [x] GPU-only training
 - [ ] Multi-GPU training
 - [ ] Gradient checkpointing for large models

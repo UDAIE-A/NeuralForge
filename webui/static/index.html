@@ -42,12 +42,12 @@
 
   /* Chat */
   .messages { flex: 1; overflow-y: auto; padding: 22px 18px; display: flex; flex-direction: column; gap: 16px; }
-  .msg { display: flex; gap: 12px; max-width: 90%; }
+  .msg { display: flex; gap: 12px; max-width: 90%; align-self: flex-start; }
   .msg .avatar { width: 28px; height: 28px; border-radius: 7px; flex: 0 0 28px; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;}
   .msg.user { align-self: flex-end; flex-direction: row-reverse; }
   .msg.user .avatar { background: var(--accent2); }
   .msg.assistant .avatar { background: var(--accent); }
-  .bubble { padding: 11px 14px; border-radius: var(--radius); line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; font-size: 14.5px;}
+  .bubble { padding: 11px 14px; border-radius: var(--radius); line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; font-size: 14.5px;}
   .msg.user .bubble { background: var(--user); }
   .msg.assistant .bubble { background: var(--assistant); border: 1px solid var(--border); }
   .empty { color: var(--muted); text-align: center; margin: auto; max-width: 360px; line-height:1.6;}
@@ -109,6 +109,21 @@
   canvas { width: 100% !important; }
   .blink::after { content: "▋"; animation: blink 1s steps(2) infinite; color: var(--accent);}
   @keyframes blink { 0%,50%{opacity:1} 50.01%,100%{opacity:0} }
+
+  /* Live learning feedback toolbar under assistant messages */
+  .fb { display: flex; gap: 6px; margin: 2px 0 10px 40px; max-width: 92%;
+    flex-wrap: wrap; align-items: center; align-self: flex-start; }
+  .fb button { background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+    padding: 5px 9px; font-size: 12px; border-radius: 8px; font-weight: 500; }
+  .fb button:hover { color: var(--text); border-color: var(--accent); }
+  .fb button.up.on { color: #10a37f; border-color: #10a37f; }
+  .fb button.down.on { color: #e5534b; border-color: #e5534b; }
+  .fb .fb-note { font-size: 11.5px; color: var(--accent); }
+  .fb input { flex: 0 1 260px; min-width: 120px; max-width: 260px; background: var(--bg); }
+
+  /* Learn card */
+  .learn-stat { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .learn-stat .stat .v { font-size: 15px; }
 </style>
 </head>
 <body>
@@ -180,8 +195,28 @@
             <div class="seg">
               <button data-tok="char" class="active" id="tokChar">Character (fast)</button>
               <button data-tok="bpe" id="tokBpe">BPE (quality)</button>
-            </div>
+        <!-- Live Learning -->
+        <div class="card">
+          <h3>Live Learning <span class="status-pill" id="learnPill">idle</span></h3>
+          <div class="hint" style="margin-top:-6px;margin-bottom:10px;">
+            Teach the model as you chat: under any reply use 👍 (approve), 👎 (reject),
+            or ✏ (type a better answer). Each reaction runs a few live gradient steps.
           </div>
+          <div class="learn-stat">
+            <div class="stat"><div class="v" id="lInter">0</div><div class="k">Interactions</div></div>
+            <div class="stat"><div class="v" id="lSteps">0</div><div class="k">Grad steps</div></div>
+            <div class="stat"><div class="v" id="lLossB">—</div><div class="k">Last loss before</div></div>
+            <div class="stat"><div class="v" id="lLossA">—</div><div class="k">Last loss after</div></div>
+          </div>
+          <div style="display:flex; gap:10px; margin-top:14px;">
+            <button class="ghost small" id="learnSave" style="flex:1;">💾 Save model</button>
+            <button class="ghost small" id="learnExport" style="flex:1;">📤 Export corpus</button>
+          </div>
+          <div class="err" id="learnErr"></div>
+        </div>
+
+      </div>
+    </div>
           <div class="grid2">
             <div class="field"><label>Epochs</label><input type="number" id="epochs" value="30"></div>
             <div class="field"><label>Seq length</label><input type="number" id="seqlen" value="128"></div>
@@ -232,7 +267,7 @@
 const $ = id => document.getElementById(id);
 const fmtTime = s => { s=Math.round(s||0); if(s<60)return s+'s'; if(s<3600)return Math.floor(s/60)+'m '+(s%60)+'s'; return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m'; };
 
-let CHECKPOINTS = [], TOK = 'char', lastStatus = 'idle';
+let CHECKPOINTS = [], TOK = 'char', lastStatus = 'idle', PRESET_CONFIGS = {};
 
 // ---- bootstrap ----
 async function loadInfo() {
@@ -240,10 +275,12 @@ async function loadInfo() {
   if (d.gpu && d.gpu.name) $('gpuName').textContent = d.gpu.name + ' · ' + d.gpu.total_gb + 'GB';
   else $('gpuName').textContent = d.cuda ? 'CUDA GPU' : 'No CUDA';
   $('preset').innerHTML = d.presets.map(p => `<option value="${p}" ${p==='small'?'selected':''}>${p}</option>`).join('');
+  PRESET_CONFIGS = d.preset_configs || {};
   $('data').innerHTML = d.datafiles.map(f => `<option value="${f.path}">${f.name} (${f.size_kb}KB)</option>`).join('');
   if ($('data').options.length) $('data').options[0].selected = true;
   CHECKPOINTS = d.checkpoints;
   renderModels();
+  updateFieldsFromPreset(); // Update form fields based on initial preset selection
 }
 function renderModels() {
   const chatSel = $('chatModel'); const chatCur = chatSel.value;
@@ -269,6 +306,18 @@ $('tokChar').onclick = () => setTok('char');
 $('tokBpe').onclick = () => setTok('bpe');
 function setTok(t){ TOK=t; $('tokChar').classList.toggle('active',t==='char'); $('tokBpe').classList.toggle('active',t==='bpe'); $('vocabField').style.opacity = t==='bpe'?1:.4; }
 setTok('char');
+
+// ---- preset change handler ----
+function updateFieldsFromPreset() {
+  const preset = $('preset').value;
+  const config = PRESET_CONFIGS[preset];
+  if (config) {
+    $('seqlen').value = config.seq_len || 128;
+    $('epochs').value = config.epochs || 30;
+    $('batch').value = config.batch_size || 32;
+  }
+}
+$('preset').onchange = updateFieldsFromPreset;
 
 // ---- sampling sliders ----
 const bind=(id,vid)=>{ const e=$(id); const f=()=>$(vid).textContent=e.value; e.oninput=f; f(); };
@@ -332,7 +381,7 @@ function connectMetrics(){
 }
 
 // ---- chat websocket ----
-let chatWS, curBubble=null, generating=false;
+let chatWS, curBubble=null, generating=false, lastUserPrompt='', lastResponse='';
 function connectChat(){
   chatWS = new WebSocket(`ws://${location.host}/ws/chat`);
   chatWS.onclose = ()=> setTimeout(connectChat,1500);
@@ -340,7 +389,7 @@ function connectChat(){
     const d = JSON.parse(ev.data);
     if(d.type==='start'){ curBubble=addMsg('assistant',''); curBubble.classList.add('blink'); }
     else if(d.type==='token'){ if(curBubble){ curBubble.textContent+=d.text; scrollMsgs(); } }
-    else if(d.type==='done'){ if(curBubble) curBubble.classList.remove('blink'); endGen(); }
+    else if(d.type==='done'){ if(curBubble){ curBubble.classList.remove('blink'); lastResponse=curBubble.textContent; attachFeedback(curBubble, lastUserPrompt, lastResponse); } endGen(); }
     else if(d.type==='error'){ if(curBubble){curBubble.classList.remove('blink'); curBubble.textContent='⚠ '+d.message; curBubble.style.color='#e5534b';} else addMsg('assistant','⚠ '+d.message); endGen(); }
   };
 }
@@ -353,10 +402,50 @@ function addMsg(role,text){
   wrap.appendChild(av); wrap.appendChild(b); $('messages').appendChild(wrap); scrollMsgs(); return b;
 }
 function scrollMsgs(){ const m=$('messages'); m.scrollTop=m.scrollHeight; }
+
+// ---- live learning: feedback toolbar under each assistant reply ----
+async function teach(box, prompt, response, type, preferred){
+  const ckpt=$('chatModel').value; if(!ckpt) return;
+  const fb=box.parentNode.nextElementSibling; if(fb && fb.classList.contains('fb')) fb.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    const r=await fetch('/api/learn/teach',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({checkpoint:ckpt, prompt, response, feedback_type:type, preferred:preferred||null})});
+    const d=await r.json();
+    if(!d.ok){ const n=document.createElement('span'); n.className='fb-note'; n.style.color='#e5534b'; n.textContent='⚠ '+d.error; if(fb) fb.appendChild(n); return; }
+    const res=d.result;
+    const note=document.createElement('span'); note.className='fb-note';
+    note.textContent=`learned · loss ${(res.loss_before??0).toFixed?.(4)??res.loss_before} → ${(res.loss_after??0).toFixed?.(4)??res.loss_after}`;
+    if(fb) fb.appendChild(note);
+  }catch(e){ const n=document.createElement('span'); n.className='fb-note'; n.style.color='#e5534b'; n.textContent='⚠ network'; if(fb) fb.appendChild(n); }
+}
+function attachFeedback(box, prompt, response){
+  const fb=document.createElement('div'); fb.className='fb';
+  const up=document.createElement('button'); up.className='up'; up.textContent='👍 approve';
+  const down=document.createElement('button'); down.className='down'; down.textContent='👎 reject';
+  const edit=document.createElement('button'); edit.className='edit'; edit.textContent='✏ correct';
+  up.onclick=()=>{ up.classList.add('on'); teach(box,prompt,response,'approve',null); };
+  down.onclick=()=>{
+    down.classList.add('on');
+    const inp=document.createElement('input'); inp.type='text'; inp.placeholder='Better answer (Enter to teach, blank = just log)';
+    const go=document.createElement('button'); go.textContent='Teach'; fb.appendChild(inp); fb.appendChild(go);
+    const send=()=>{ const v=inp.value.trim(); teach(box,prompt,response,'reject',v||null); inp.disabled=true; go.disabled=true; };
+    go.onclick=send; inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();send();} }); inp.focus();
+  };
+  edit.onclick=()=>{
+    const inp=document.createElement('input'); inp.type='text'; inp.placeholder='Type the ideal answer, then Enter';
+    const go=document.createElement('button'); go.textContent='Teach'; fb.appendChild(inp); fb.appendChild(go);
+    const send=()=>{ const v=inp.value.trim(); if(!v) return; teach(box,prompt,response,'demonstrate',v); inp.disabled=true; go.disabled=true; };
+    go.onclick=send; inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();send();} }); inp.focus();
+  };
+  fb.appendChild(up); fb.appendChild(down); fb.appendChild(edit);
+  box.parentNode.parentNode.insertBefore(fb, box.parentNode.nextSibling);
+}
+
 function send(){
   const p=$('prompt').value.trim(); if(!p||generating) return;
   const ckpt=$('chatModel').value;
   if(!ckpt){ addMsg('assistant','⚠ Select a model first (train one in the admin panel).'); return; }
+  lastUserPrompt=p;
   addMsg('user',p); $('prompt').value=''; $('prompt').style.height='auto';
   generating=true; $('sendBtn').disabled=true; $('sendBtn').textContent='…';
   chatWS.send(JSON.stringify({
@@ -368,8 +457,39 @@ $('sendBtn').onclick=send;
 $('prompt').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
 $('prompt').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,160)+'px'; });
 
+// ---- live learning card: poll stats, save, export ----
+function connectLearn(){
+  setInterval(async ()=>{
+    try{
+      const r=await fetch('/api/learn/status'); const d=await r.json();
+      $('lInter').textContent=d.interactions||0;
+      $('lSteps').textContent=d.total_steps||0;
+      $('lLossB').textContent=d.last_loss_before!=null?Number(d.last_loss_before).toFixed(4):'—';
+      $('lLossA').textContent=d.last_loss_after!=null?Number(d.last_loss_after).toFixed(4):'—';
+      const pill=$('learnPill');
+      if(d.loaded){ pill.textContent='learning'; pill.className='status-pill training'; }
+      else { pill.textContent='idle'; pill.className='status-pill'; }
+    }catch(e){}
+  }, 1000);
+}
+$('learnSave').onclick = async ()=>{
+  const ckpt=$('chatModel').value; if(!ckpt){ $('learnErr').textContent='Select a model first'; return; }
+  $('learnErr').textContent='saving…';
+  const r=await fetch('/api/learn/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({checkpoint:ckpt})});
+  const d=await r.json();
+  $('learnErr').textContent = d.ok ? ('Saved '+d.path.split(/[\\/]/).pop()) : ('⚠ '+d.error);
+  if(d.ok) setTimeout(refreshCheckpoints, 900);
+};
+$('learnExport').onclick = async ()=>{
+  const ckpt=$('chatModel').value; if(!ckpt){ $('learnErr').textContent='Select a model first'; return; }
+  $('learnErr').textContent='exporting…';
+  const r=await fetch('/api/learn/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({checkpoint:ckpt})});
+  const d=await r.json();
+  $('learnErr').textContent = d.ok ? ('Exported '+d.path.split(/[\\/]/).pop()) : ('⚠ '+d.error);
+};
+
 // ---- go ----
-loadInfo(); connectMetrics(); connectChat();
+loadInfo(); connectMetrics(); connectChat(); connectLearn();
 </script>
 </body>
 </html>

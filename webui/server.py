@@ -35,6 +35,9 @@ from neuralforge.tokenizer.char_tokenizer import CharTokenizer
 from neuralforge.training import Trainer, create_dataloaders
 from neuralforge.training.data import read_text_input
 from neuralforge.training.trainer import get_gpu_stats
+from neuralforge.learning import OnlineLearner
+
+import webui.bridge as bridge
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -62,7 +65,49 @@ TRAIN_THREAD: Optional[threading.Thread] = None
 
 # Cache of loaded inference models: path -> (model, tokenizer)
 MODEL_CACHE = {}
+
 MODEL_LOCK = threading.Lock()
+
+# ----------------------------------------------------------------------------
+# Live learning state (one OnlineLearner per checkpoint, reusing the cached
+# inference model so subsequent generations reflect what was just taught).
+# ----------------------------------------------------------------------------
+LEARN = {
+    "lock": threading.Lock(),
+    "learners": {},   # ckpt_rel -> OnlineLearner
+    "status": {
+        "loaded": False, "model": None,
+        "interactions": 0, "total_steps": 0,
+        "last_loss_before": None, "last_loss_after": None, "last_type": None,
+    },
+}
+
+
+def get_learner(ckpt_rel: str, lr: float = 3e-5, steps: int = 6):
+    """Return (creating if needed) the OnlineLearner for a checkpoint."""
+    with LEARN["lock"]:
+        if ckpt_rel in LEARN["learners"]:
+            return LEARN["learners"][ckpt_rel]
+        model, tokenizer = load_model_for_inference(ckpt_rel)
+        ckpt_path = os.path.join(ROOT, ckpt_rel)
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        config = checkpoint["config"]
+        config.device = "cuda"
+        learner = OnlineLearner(model, tokenizer, config, lr=lr, device="cuda", steps=steps)
+        LEARN["learners"][ckpt_rel] = learner
+        return learner
+
+
+def _record_learn_status(learner: OnlineLearner, result: dict, ckpt_rel: str):
+    with LEARN["lock"]:
+        LEARN["status"].update({
+            "loaded": True, "model": ckpt_rel,
+            "interactions": learner.stats["interactions"],
+            "total_steps": learner.stats["total_steps"],
+            "last_loss_before": learner.stats["last_loss_before"],
+            "last_loss_after": learner.stats["last_loss_after"],
+            "last_type": result.get("type"),
+        })
 
 
 # ----------------------------------------------------------------------------
@@ -201,12 +246,19 @@ def _training_worker(params):
             # Tokenizer
             with TRAIN_LOCK:
                 TRAIN["status"] = "building tokenizer"
+            # Train the tokenizer on a representative SAMPLE of the corpus. BPE
+            # merge learning is O(vocab x corpus) in this pure-Python impl, so
+            # using the full 30+ MB text can take ages while adding nothing the
+            # model needs -- the learned merges generalize. The model below
+            # still trains on the ENTIRE corpus.
+            BPE_SAMPLE_CHARS = 4_000_000
+            tok_text = text[:BPE_SAMPLE_CHARS]
             if params.get("char"):
                 tokenizer = CharTokenizer()
-                tokenizer.train(text)
+                tokenizer.train(tok_text)
             else:
                 tokenizer = BPETokenizer()
-                tokenizer.train(text, vocab_size=int(params.get("vocab_size", 8000)))
+                tokenizer.train(tok_text, vocab_size=int(params.get("vocab_size", 8000)))
 
             # Config + model
             config = ModelConfig.from_preset(params["preset"])
@@ -282,7 +334,27 @@ def info():
         "presets": ["tiny", "small", "base", "large", "xl", "xxl"],
         "checkpoints": list_checkpoints(),
         "datafiles": list_datafiles(),
+        "preset_configs": get_preset_configs(),
     }
+
+
+def get_preset_configs():
+    """Return preset configurations for UI form population."""
+    configs = {
+        "tiny": {"seq_len": 512, "epochs": 30, "batch_size": 16},
+        "small": {"seq_len": 1024, "epochs": 30, "batch_size": 24},
+        "base": {"seq_len": 2048, "epochs": 20, "batch_size": 16},
+        "large": {"seq_len": 2048, "epochs": 15, "batch_size": 12},
+        "xl": {"seq_len": 4096, "epochs": 10, "batch_size": 8},
+        "xxl": {"seq_len": 4096, "epochs": 8, "batch_size": 4},
+    }
+    return configs
+
+
+@app.get("/api/presets")
+def get_presets():
+    """Get all preset configurations."""
+    return get_preset_configs()
 
 
 @app.get("/api/checkpoints")
@@ -312,6 +384,140 @@ def train_stop():
         return {"ok": False, "error": "No training running"}
     STOP_FLAG["stop"] = True
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Live learning endpoints (human-in-the-loop online fine-tuning)
+# ----------------------------------------------------------------------------
+@app.post("/api/learn/teach")
+async def learn_teach(req: dict):
+    """Apply one piece of human feedback as a few live gradient steps."""
+    ckpt = req.get("checkpoint")
+    if not ckpt:
+        return JSONResponse({"ok": False, "error": "No model selected"}, status_code=400)
+    prompt = req.get("prompt", "")
+    response = req.get("response", "")
+    ftype = req.get("feedback_type", "approve")  # approve | reject | demonstrate
+    preferred = (req.get("preferred") or "").strip() or None
+    try:
+        learner = get_learner(
+            ckpt, lr=float(req.get("lr", 3e-5)), steps=int(req.get("steps", 6))
+        )
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    try:
+        if ftype == "reject":
+            result = learner.reject(prompt, response, preferred=preferred)
+        elif ftype == "demonstrate":
+            result = learner.teach(prompt, preferred or response)
+        else:
+            result = learner.approve(prompt, response)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    _record_learn_status(learner, result, ckpt)
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/learn/status")
+def learn_status():
+    with LEARN["lock"]:
+        return dict(LEARN["status"])
+
+
+@app.post("/api/learn/save")
+async def learn_save(req: dict):
+    """Persist the learned weights so they survive a restart."""
+    ckpt = req.get("checkpoint")
+    if not ckpt:
+        return JSONResponse({"ok": False, "error": "No model selected"}, status_code=400)
+    path = req.get("path") or os.path.join(ROOT, "checkpoints", "learned.pt")
+    try:
+        learner = get_learner(ckpt)
+        saved = learner.save(path)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    # Refresh the inference cache so the saved copy is discoverable.
+    with MODEL_LOCK:
+        MODEL_CACHE.clear()
+    return {"ok": True, "path": saved}
+
+
+@app.post("/api/learn/export")
+async def learn_export(req: dict):
+    """Export all taught examples to a plain-text corpus for offline training."""
+    ckpt = req.get("checkpoint")
+    if not ckpt:
+        return JSONResponse({"ok": False, "error": "No model selected"}, status_code=400)
+    path = req.get("path") or os.path.join(ROOT, "data", "learned_interactions.txt")
+    try:
+        learner = get_learner(ckpt)
+        out = learner.export_corpus(path)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "path": out}
+
+
+# ----------------------------------------------------------------------------
+# Auto-Tutor bridge (live agent<->model teach-loop)
+# ----------------------------------------------------------------------------
+@app.post("/api/bridge/start")
+async def bridge_start(req: dict):
+    ckpt = req.get("checkpoint")
+    if not ckpt:
+        return JSONResponse({"ok": False, "error": "No model selected"}, status_code=400)
+    expected = (req.get("expected") or "Hello! How can I help you today?").strip()
+    prompt = (req.get("prompt") or "hi").strip()
+    try:
+        ok, msg = bridge.start(
+            ckpt,
+            expected,
+            prompt=prompt,
+            max_iters=int(req.get("max_iters", 20)),
+            steps=int(req.get("steps", 10)),
+            lr=float(req.get("lr", 1e-4)),
+            temperature=float(req.get("temperature", 0.6)),
+            max_tokens=int(req.get("max_tokens", 80)),
+            threshold=float(req.get("threshold", 0.40)),
+        )
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return {"ok": ok, "message": msg}
+
+
+@app.post("/api/bridge/stop")
+def bridge_stop():
+    bridge.stop()
+    return {"ok": True}
+
+
+@app.get("/api/bridge/status")
+def bridge_status():
+    with bridge.BUS.lock:
+        return dict(bridge.BUS.status)
+
+
+@app.get("/bridge")
+def bridge_page():
+    return FileResponse(os.path.join(STATIC, "bridge.html"))
+
+
+@app.websocket("/ws/bridge")
+async def ws_bridge(ws: WebSocket):
+    await ws.accept()
+    loop = asyncio.get_event_loop()
+    q = bridge.BUS.subscribe()
+    # Push current status immediately so the page is never blank.
+    try:
+        with bridge.BUS.lock:
+            await ws.send_text(json.dumps({"type": "status", **bridge.BUS.status}))
+        while True:
+            kind, val = await loop.run_in_executor(None, q.get)
+            await ws.send_text(json.dumps(val))
+    except (WebSocketDisconnect, RuntimeError):
+        bridge.BUS.unsubscribe(q)
+        return
+    except Exception:  # noqa
+        bridge.BUS.unsubscribe(q)
 
 
 @app.get("/api/train/status")
@@ -409,5 +615,27 @@ if os.path.isdir(STATIC):
 
 if __name__ == "__main__":
     import uvicorn
+
+    # ---- Unattended auto-start: kick the teach-loop on boot so it runs with
+    #      no browser open and no human/agent in the loop. The web UI can still
+    #      watch it live at /bridge (and stop/restart it from there). ----
+    def _autostart_bridge():
+        try:
+            ckpt = "runs/ui/tiny_train.pt"
+            if os.path.exists(os.path.join(ROOT, ckpt)):
+                ok, msg = bridge.start(
+                    ckpt,
+                    expected="Hello! How can I help you today?",
+                    prompt="hi", max_iters=20, steps=12, lr=1e-4,
+                    continuous=True,
+                )
+                print(f"  [bridge] auto-start: {msg} ({ckpt})")
+            else:
+                print("  [bridge] auto-start skipped: checkpoint not found")
+        except Exception as e:  # noqa
+            print(f"  [bridge] auto-start failed: {e}")
+
+    threading.Thread(target=_autostart_bridge, daemon=True).start()
+
     print("\n  NeuralForge Studio -> http://127.0.0.1:8000\n")
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
