@@ -117,7 +117,7 @@ class Trainer:
         checkpoint_dir: str = "checkpoints",
         log_interval: int = 1,
         eval_interval: int = 500,
-        save_interval: int = 1000,
+        save_interval: Optional[int] = None,
         gradient_accumulation_steps: int = 1,
         compile_model: bool = True,
         metrics_callback=None,
@@ -145,6 +145,9 @@ class Trainer:
         self.checkpoint_dir = checkpoint_dir
         self.log_interval = log_interval
         self.eval_interval = eval_interval
+        # None -> adaptive: sized to the run in train() so every run gets a
+        # consistent number of rolling <name>_train.pt saves (~30 per run)
+        # regardless of whether it's 300 steps or 30,000.
         self.save_interval = save_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
         # Explicit warmup override (CLI --warmup-steps); None means adaptive.
@@ -246,6 +249,7 @@ class Trainer:
         print(f"  Batches:     {len(self.train_loader)} per epoch")
         print(f"  Epochs:      {num_epochs}")
         print(f"  Seq length:  {self.config.max_seq_len}")
+        print(f"  Save every:  {self.save_interval} steps (rolling {self.model_name}_train.pt)")
         print(f"  Est. time:   {format_time(estimated_time)}")
         print("=" * 70)
         print()
@@ -430,6 +434,11 @@ class Trainer:
         else:
             self.scheduler.warmup_steps = self.warmup_steps
         self.scheduler.max_steps = max(self.scheduler.warmup_steps + 1, optimizer_steps)
+
+        # Adaptive checkpoint cadence: ~30 rolling saves per run, so a 300-step
+        # run saves every 10 steps and a 3000-step run every 100.
+        if self.save_interval is None:
+            self.save_interval = max(1, optimizer_steps // 30)
 
         estimated_time = self._estimate_time(num_epochs)
         self._print_header(num_epochs, estimated_time)

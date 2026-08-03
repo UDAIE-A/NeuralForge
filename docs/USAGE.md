@@ -76,11 +76,15 @@ python train.py --data <file> [options]
 | `--stride` | int | `seq_len/2` | Sliding-window stride between training sequences. |
 | `--no-compile` | flag | off | Disable `torch.compile` (auto-skipped if Triton is missing). |
 | `--seed` | int | `None` | Random seed for reproducible runs (torch/cuda/python/numpy). |
+| `--save-interval` | int | adaptive | Checkpoint save interval in optimizer steps (default: ~30 saves per run, so 300 steps = every 10, 3000 = every 100). |
 
 **Set in code (not CLI flags)** — defaults in `neuralforge/training/trainer.py`:
-`compile_model=True` (torch.compile), `eval_interval=500`, `save_interval=1000`.
+`compile_model=True` (torch.compile), `eval_interval=500`.
 The LR warmup is adaptive: with no `--warmup-steps`, it's capped at ~10% of
 the run so short training sessions still reach the full LR and cosine decay.
+Checkpoint saves are also adaptive: without `--save-interval`, the rolling
+`<name>_train.pt` is written ~30 times per run (300 steps → every 10, 3000 →
+every 100).
 
 ### Train examples
 

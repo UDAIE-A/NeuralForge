@@ -84,6 +84,9 @@ def main():
                        help='LR warmup steps (default: adaptive, capped at ~10%% of the run)')
     parser.add_argument('--stride', type=int, default=None,
                        help='Sliding-window stride for sequence sampling (default: seq_len/2)')
+    parser.add_argument('--save-interval', type=int, default=None,
+                       help='Checkpoint save interval in optimizer steps '
+                            '(default: adaptive, ~30 saves per run)')
 
     args = parser.parse_args()
     model_name = args.name or args.preset
@@ -177,6 +180,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         compile_model=not args.no_compile,
         gradient_accumulation_steps=args.grad_accum,
+        save_interval=args.save_interval,
         model_name=model_name,
         tokenizer=tokenizer,
         warmup_steps=args.warmup_steps,
