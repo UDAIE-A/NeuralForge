@@ -19,6 +19,7 @@ import queue
 import pickle
 import asyncio
 import threading
+import re
 from typing import Optional
 
 import torch
@@ -41,6 +42,29 @@ import webui.bridge as bridge
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# The conversational corpus formats turns as "User: <q>\nAssistant: <a>".
+# During generation the model keeps writing those markers for the NEXT turn
+# ("User: ..."), which would leak into the chat bubble - so we feed the prompt
+# in that format and cut the reply at the first marker that starts a new turn.
+CHAT_PROMPT_TMPL = "User: {prompt}\nAssistant:"
+# "User:" (or the "ser:" left over when a char vocab lacks 'U') at the start of
+# a line begins the next conversation turn - cut the reply there.
+_NEXT_TURN = re.compile(r"\n\s*u?ser\s*:|(?:\n|^)\s*assistant\s*:", re.IGNORECASE)
+
+
+def clean_chat_reply(text: str) -> tuple:
+    """Return (cleaned_text, next_turn_found).
+
+    Strips a leading role echo ("Assistant:" / "<unk>ser:") and cuts the reply
+    at the first marker that starts a new turn ("\nUser:" or the same text the
+    tokenizer produces when the vocab is missing capital letters, "ser:").
+    """
+    t = re.sub(r"^\s*(?:assistant|u?ser)\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
+    m = _NEXT_TURN.search(t)
+    if m:
+        return t[:m.start()].rstrip(), True
+    return t.rstrip(), False
 
 app = FastAPI(title="NeuralForge Studio")
 
@@ -246,13 +270,13 @@ def _training_worker(params):
             # Tokenizer
             with TRAIN_LOCK:
                 TRAIN["status"] = "building tokenizer"
-            # Train the tokenizer on a representative SAMPLE of the corpus. BPE
-            # merge learning is O(vocab x corpus) in this pure-Python impl, so
-            # using the full 30+ MB text can take ages while adding nothing the
-            # model needs -- the learned merges generalize. The model below
-            # still trains on the ENTIRE corpus.
+            # Train the tokenizer on a representative SAMPLE of the corpus.
+            # The model below still trains on the ENTIRE corpus. The char
+            # tokenizer is instant and MUST see the full corpus, or rare
+            # characters (e.g. capital U/Q/X) fall out of the vocab and
+            # become <unk> in training data.
             BPE_SAMPLE_CHARS = 4_000_000
-            tok_text = text[:BPE_SAMPLE_CHARS]
+            tok_text = text if params.get("char") else text[:BPE_SAMPLE_CHARS]
             if params.get("char"):
                 tokenizer = CharTokenizer()
                 tokenizer.train(tok_text)
@@ -365,7 +389,9 @@ def checkpoints():
 @app.post("/api/train/start")
 async def train_start(req: dict):
     global TRAIN_THREAD
-    if TRAIN["running"]:
+    with TRAIN_LOCK:
+        already_running = TRAIN["running"]
+    if already_running:
         return JSONResponse({"ok": False, "error": "Training already running"}, status_code=409)
     if not torch.cuda.is_available():
         return JSONResponse({"ok": False, "error": "CUDA not available"}, status_code=400)
@@ -577,17 +603,22 @@ async def ws_chat(ws: WebSocket):
 
             def worker():
                 try:
-                    ids = tokenizer.encode(prompt, add_special_tokens=False)
+                    eos = getattr(tokenizer, "eos_id", None)
+                    chat_prompt = CHAT_PROMPT_TMPL.format(prompt=prompt)
+                    ids = tokenizer.encode(chat_prompt, add_special_tokens=False)
                     x = torch.tensor([ids], dtype=torch.long, device="cuda")
                     gen_ids = []
                     prev_text = ""
-                    for tok in model.generate_stream(x, **opts):
+                    for tok in model.generate_stream(x, eos_id=eos, **opts):
                         gen_ids.append(tok)
-                        text = tokenizer.decode(gen_ids)
-                        delta = text[len(prev_text):]
-                        prev_text = text
-                        if delta:
-                            q.put(("delta", delta))
+                        text, next_turn = clean_chat_reply(tokenizer.decode(gen_ids))
+                        if len(text) >= len(prev_text):
+                            delta = text[len(prev_text):]
+                            prev_text = text
+                            if delta:
+                                q.put(("delta", delta))
+                        if next_turn:
+                            break
                     q.put(("done", None))
                 except Exception as e:  # noqa
                     q.put(("error", str(e)))

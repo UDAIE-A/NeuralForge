@@ -195,6 +195,24 @@
             <div class="seg">
               <button data-tok="char" class="active" id="tokChar">Character (fast)</button>
               <button data-tok="bpe" id="tokBpe">BPE (quality)</button>
+            </div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>Epochs</label><input type="number" id="epochs" value="30"></div>
+            <div class="field"><label>Seq length</label><input type="number" id="seqlen" value="128"></div>
+            <div class="field"><label>Batch size</label><input type="number" id="batch" value="32"></div>
+            <div class="field"><label>Learning rate</label><input type="text" id="lr" value="3e-4"></div>
+            <div class="field" id="vocabField"><label>Vocab (BPE)</label><input type="number" id="vocab" value="8000"></div>
+            <div class="field"><label>Checkpoint dir</label><input type="text" id="ckptdir" value="runs/ui"></div>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <button id="startBtn" style="flex:1;">▶ Start Training</button>
+            <button id="stopBtn" class="danger" style="flex:1; display:none;">■ Stop</button>
+          </div>
+          <div class="err" id="trainErr"></div>
+          <div class="hint">Tip: on a 12 GB GPU, <b>tiny</b> @ batch 16 is the default. Lower batch first if you hit OOM.</div>
+        </div>
+
         <!-- Live Learning -->
         <div class="card">
           <h3>Live Learning <span class="status-pill" id="learnPill">idle</span></h3>
@@ -213,24 +231,6 @@
             <button class="ghost small" id="learnExport" style="flex:1;">📤 Export corpus</button>
           </div>
           <div class="err" id="learnErr"></div>
-        </div>
-
-      </div>
-    </div>
-          <div class="grid2">
-            <div class="field"><label>Epochs</label><input type="number" id="epochs" value="30"></div>
-            <div class="field"><label>Seq length</label><input type="number" id="seqlen" value="128"></div>
-            <div class="field"><label>Batch size</label><input type="number" id="batch" value="32"></div>
-            <div class="field"><label>Learning rate</label><input type="text" id="lr" value="3e-4"></div>
-            <div class="field" id="vocabField"><label>Vocab (BPE)</label><input type="number" id="vocab" value="8000"></div>
-            <div class="field"><label>Checkpoint dir</label><input type="text" id="ckptdir" value="runs/ui"></div>
-          </div>
-          <div style="display:flex; gap:10px;">
-            <button id="startBtn" style="flex:1;">▶ Start Training</button>
-            <button id="stopBtn" class="danger" style="flex:1; display:none;">■ Stop</button>
-          </div>
-          <div class="err" id="trainErr"></div>
-          <div class="hint">Tip: on a 12 GB GPU, <b>small</b> @ batch 24–32 is a good keeper run. Lower batch first if you hit OOM.</div>
         </div>
 
         <!-- Live metrics -->
@@ -274,7 +274,7 @@ async function loadInfo() {
   const r = await fetch('/api/info'); const d = await r.json();
   if (d.gpu && d.gpu.name) $('gpuName').textContent = d.gpu.name + ' · ' + d.gpu.total_gb + 'GB';
   else $('gpuName').textContent = d.cuda ? 'CUDA GPU' : 'No CUDA';
-  $('preset').innerHTML = d.presets.map(p => `<option value="${p}" ${p==='small'?'selected':''}>${p}</option>`).join('');
+  $('preset').innerHTML = d.presets.map(p => `<option value="${p}" ${p==='tiny'?'selected':''} ${p!=='tiny'?'disabled':''}>${p}${p!=='tiny'?' (coming soon)':''}</option>`).join('');
   PRESET_CONFIGS = d.preset_configs || {};
   $('data').innerHTML = d.datafiles.map(f => `<option value="${f.path}">${f.name} (${f.size_kb}KB)</option>`).join('');
   if ($('data').options.length) $('data').options[0].selected = true;
@@ -290,9 +290,17 @@ function renderModels() {
     resumeSel.innerHTML = '<option value="">Start fresh</option>';
     return;
   }
-  const options = CHECKPOINTS.map(c => `<option value="${c.path}">${c.name} · ${c.size_mb}MB</option>`).join('');
-  chatSel.innerHTML = options;
-  resumeSel.innerHTML = '<option value="">Start fresh</option>' + options;
+  // Chat dropdown: only published models (exclude _train / _best artifacts)
+  const published = CHECKPOINTS.filter(c => !c.name.endsWith('_train.pt') && !c.name.endsWith('_best.pt'));
+  chatSel.innerHTML = published.length
+    ? published.map(c => `<option value="${c.path}">${c.name} · ${c.size_mb}MB</option>`).join('')
+    : '<option value="">No published models yet</option>';
+  // Resume dropdown: show _train.pt (resumable) + published models
+  const allOptions = CHECKPOINTS.map(c => {
+    const label = c.name.endsWith('_train.pt') ? `${c.name} (resumable)` : c.name;
+    return `<option value="${c.path}">${label} · ${c.size_mb}MB</option>`;
+  }).join('');
+  resumeSel.innerHTML = '<option value="">Start fresh</option>' + allOptions;
   if (chatCur) chatSel.value = chatCur;
   if (resumeCur) resumeSel.value = resumeCur;
 }

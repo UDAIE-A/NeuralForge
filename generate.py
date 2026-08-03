@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import os
+import random
 import sys
 import torch
 
@@ -39,8 +40,15 @@ def main():
                        help='Penalty for repeating tokens (>1.0 discourages repetition)')
     parser.add_argument('--interactive', action='store_true',
                        help='Interactive mode')
-    
+    parser.add_argument('--seed', type=int, default=None,
+                       help='Random seed for reproducible generation')
+
     args = parser.parse_args()
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        random.seed(args.seed)
     
     # GPU check
     if not torch.cuda.is_available():
@@ -81,6 +89,10 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()
+
+    # Stop generation at <eos> when the tokenizer defines one, so replies
+    # don't run on past the end of the answer.
+    eos_id = getattr(tokenizer, 'eos_id', None)
     
     print(f"\nModel loaded: {model.count_parameters():,} parameters")
     print(f"Device: {device}")
@@ -112,7 +124,8 @@ def main():
                         temperature=args.temperature,
                         top_k=args.top_k,
                         top_p=args.top_p,
-                        repetition_penalty=args.repetition_penalty
+                        repetition_penalty=args.repetition_penalty,
+                        eos_id=eos_id
                     )
 
                 # Decode
@@ -139,7 +152,8 @@ def main():
                 temperature=args.temperature,
                 top_k=args.top_k,
                 top_p=args.top_p,
-                repetition_penalty=args.repetition_penalty
+                repetition_penalty=args.repetition_penalty,
+                eos_id=eos_id
             )
 
         # Decode

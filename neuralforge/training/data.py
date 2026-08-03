@@ -64,6 +64,11 @@ class TextDataset(Dataset):
         # Calculate number of sequences
         self.num_sequences = max(0, (len(self.tokens) - seq_len) // stride + 1)
         print(f"Created {self.num_sequences} sequences of length {seq_len}")
+        if self.num_sequences == 0:
+            raise ValueError(
+                f"Corpus is too small ({len(self.tokens):,} tokens) for "
+                f"seq_len={seq_len} - add more data or lower --seq-len"
+            )
     
     def __len__(self) -> int:
         return self.num_sequences
@@ -121,10 +126,10 @@ def create_dataloaders(
     if val_data is None and val_fraction > 0:
         full_text = read_text_input(train_data)
         split_at = int(len(full_text) * (1 - val_fraction))
-        train_text, val_text = full_text[:split_at], full_text[split_at:]
+        train_text_split, val_text = full_text[:split_at], full_text[split_at:]
         if len(val_text) > seq_len:
-            print(f"  Auto val split: {len(train_text):,} train / {len(val_text):,} val chars")
-            train_data, val_data = train_text, val_text
+            print(f"  Auto val split: {len(train_text_split):,} train / {len(val_text):,} val chars")
+            train_data, val_data = train_text_split, val_text
 
     train_dataset = TextDataset(train_data, tokenizer, seq_len, stride)
 
@@ -151,12 +156,13 @@ def create_dataloaders(
     val_loader = None
     if val_data:
         val_dataset = TextDataset(val_data, tokenizer, seq_len, stride)
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True
-        )
+        if len(val_dataset) > 0:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=min(batch_size, len(val_dataset)),
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=True
+            )
     
     return train_loader, val_loader

@@ -23,7 +23,6 @@ checkpoints/feedback.jsonl and can be exported to a corpus for offline training.
 
 import os
 import sys
-import json
 import argparse
 import threading
 
@@ -70,6 +69,7 @@ def generate(model, tokenizer, prompt, device, max_tokens=120, temperature=0.8,
     out = model.generate(
         x, max_new_tokens=max_tokens, temperature=temperature,
         top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+        eos_id=getattr(tokenizer, "eos_id", None),
     )
     gen_ids = out[0][len(ids):].tolist()
     return tokenizer.decode(gen_ids)

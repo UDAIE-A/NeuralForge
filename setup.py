@@ -10,6 +10,7 @@ setup(
     description="A from-scratch language model - no external model dependencies",
     author="NeuralForge Team",
     packages=find_packages(),
+    py_modules=["train", "generate", "learn"],
     python_requires=">=3.8",
     install_requires=[
         "torch>=2.0.0",

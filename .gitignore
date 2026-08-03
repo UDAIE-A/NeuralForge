@@ -33,6 +33,12 @@ runs/
 
 # Logs
 *.log
+*.err
+training_output.txt
+training_error.txt
+
+# AI tool state
+.serena/
 
 # Training data (large files) - including nested folders like data/books/
 data/**/*.txt

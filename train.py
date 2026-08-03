@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import os
+import random
 import sys
 
 import torch
@@ -73,9 +74,30 @@ def main():
     parser.add_argument('--name', type=str, default=None,
                        help='Model name for checkpoint files (default: preset name). '
                             'Produces <name>.pt (final), <name>_train.pt, <name>_best.pt')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='Random seed for reproducible runs (torch, cuda, python, numpy)')
+    parser.add_argument('--grad-accum', type=int, default=1,
+                       help='Gradient accumulation steps (simulates a larger batch size)')
+    parser.add_argument('--num-workers', type=int, default=None,
+                       help='DataLoader workers (default: 0 on Windows, 8 elsewhere)')
+    parser.add_argument('--warmup-steps', type=int, default=None,
+                       help='LR warmup steps (default: adaptive, capped at ~10%% of the run)')
+    parser.add_argument('--stride', type=int, default=None,
+                       help='Sliding-window stride for sequence sampling (default: seq_len/2)')
 
     args = parser.parse_args()
     model_name = args.name or args.preset
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        random.seed(args.seed)
+        try:
+            import numpy as np
+            np.random.seed(args.seed)
+        except ImportError:
+            pass
+        print(f"  Seed: {args.seed}")
     
     # GPU check
     if not torch.cuda.is_available():
@@ -108,7 +130,7 @@ def main():
             tokenizer = CharTokenizer()
             tokenizer.train(train_text, verbose=True)
         else:
-            print("\n  Training BPE tokenizer (slow)...")
+            print("\n  Training BPE tokenizer...")
             tokenizer = BPETokenizer()
             tokenizer.train(train_text, vocab_size=args.vocab_size, verbose=True)
 
@@ -127,7 +149,8 @@ def main():
     tok_kind = 'char' if isinstance(tokenizer, CharTokenizer) else 'BPE'
     print(f"  Vocab:       {config.vocab_size} ({tok_kind})")
     print(f"  Seq length:  {config.max_seq_len}")
-    print(f"  Batch size:  {args.batch_size}")
+    print(f"  Batch size:  {args.batch_size}"
+          f"{f' x {args.grad_accum} grad-accum' if args.grad_accum > 1 else ''}")
     print(f"  LR:          {config.learning_rate}")
     print(f"  Epochs:      {args.epochs}")
     print(f"  GPU:         {torch.cuda.get_device_name(0)}")
@@ -138,10 +161,13 @@ def main():
     # Create model
     model = NeuralForge(config)
     
-    # Create dataloaders
+    # Create dataloaders. Pass the already-read text so the corpus is only
+    # read from disk once (read_text_input is a no-op on plain strings).
     train_loader, val_loader = create_dataloaders(
-        train_input, val_input, tokenizer,
-        seq_len=config.max_seq_len, batch_size=config.batch_size
+        train_text, val_input, tokenizer,
+        seq_len=config.max_seq_len, batch_size=config.batch_size,
+        stride=args.stride if args.stride else config.max_seq_len // 2,
+        num_workers=args.num_workers if args.num_workers is not None else (0 if os.name == 'nt' else 8),
     )
     
     # Train
@@ -150,8 +176,10 @@ def main():
         train_loader=train_loader, val_loader=val_loader,
         checkpoint_dir=args.checkpoint_dir,
         compile_model=not args.no_compile,
+        gradient_accumulation_steps=args.grad_accum,
         model_name=model_name,
         tokenizer=tokenizer,
+        warmup_steps=args.warmup_steps,
     )
     
     if args.resume:

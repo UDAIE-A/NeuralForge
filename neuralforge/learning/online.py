@@ -66,7 +66,7 @@ class OnlineLearner:
         device: str = None,
         steps: int = 6,
         feedback_path: str = None,
-        eos_id: int = 2,
+        eos_id: int = None,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -76,7 +76,9 @@ class OnlineLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         # Appending <eos> to every taught answer teaches the model to STOP
         # after a reply instead of running on and drifting into repetition loops.
-        self.eos_id = eos_id
+        # The id is taken from the tokenizer so BPE and char vocabularies both
+        # use their real <eos> (hardcoding 2 is wrong for BPE tokenizers).
+        self.eos_id = eos_id if eos_id is not None else getattr(tokenizer, "eos_id", 2)
 
         # A dedicated optimizer with a small LR so a handful of online steps
         # can shift behaviour without catastrophically forgetting.

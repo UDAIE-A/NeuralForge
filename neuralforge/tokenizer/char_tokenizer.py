@@ -49,9 +49,8 @@ class CharTokenizer:
         chars = []
         for id in ids:
             if id in self.id_to_char:
-                c = self.id_to_char[id]
-                if c not in self.special_tokens.values():
-                    chars.append(c)
+                if id not in self.special_tokens.values():
+                    chars.append(self.id_to_char[id])
         return ''.join(chars)
     
     def save(self, path: str):
@@ -75,3 +74,19 @@ class CharTokenizer:
     
     def __len__(self):
         return len(self.char_to_id)
+
+    @property
+    def pad_id(self) -> int:
+        return self.special_tokens['<pad>']
+
+    @property
+    def bos_id(self) -> int:
+        return self.special_tokens['<bos>']
+
+    @property
+    def eos_id(self) -> int:
+        return self.special_tokens['<eos>']
+
+    @property
+    def unk_id(self) -> int:
+        return self.special_tokens['<unk>']

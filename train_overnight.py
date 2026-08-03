@@ -32,5 +32,6 @@ print()
 print("  Command:", " ".join(COMMAND))
 print()
 
-# Run the training
-subprocess.run(COMMAND)
+# Run the training (guarded so importing this module never launches a run)
+if __name__ == "__main__":
+    subprocess.run(COMMAND)

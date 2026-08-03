@@ -120,14 +120,13 @@ class Trainer:
         save_interval: int = 1000,
         gradient_accumulation_steps: int = 1,
         compile_model: bool = True,
-        keep_last: int = 3,
         metrics_callback=None,
         should_stop=None,
         model_name: str = "model",
         tokenizer=None,
+        warmup_steps: Optional[int] = None,
     ):
         self.model = model
-        self.keep_last = keep_last
         # Named-model checkpointing. While training we keep a single rolling
         # "<name>_train.pt" (full state, resumable) plus "<name>_best.pt"; on
         # completion we publish a clean weights-only "<name>.pt" with the
@@ -148,6 +147,8 @@ class Trainer:
         self.eval_interval = eval_interval
         self.save_interval = save_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        # Explicit warmup override (CLI --warmup-steps); None means adaptive.
+        self.warmup_steps = warmup_steps
         
         # Setup device - GPU only
         if not torch.cuda.is_available():
@@ -419,6 +420,15 @@ class Trainer:
         # Now that we know how many epochs we're running, size the LR decay to
         # the real number of optimizer steps so cosine decay actually completes.
         optimizer_steps = len(self.train_loader) * num_epochs // self.gradient_accumulation_steps
+        # Cap warmup at ~10% of the run: the config default is 4000 steps,
+        # which is longer than most short runs - the LR would keep ramping and
+        # never reach cosine decay (wasting the whole run at tiny LR).
+        if self.warmup_steps is None:
+            self.scheduler.warmup_steps = min(
+                self.config.warmup_steps, max(1, optimizer_steps // 10)
+            )
+        else:
+            self.scheduler.warmup_steps = self.warmup_steps
         self.scheduler.max_steps = max(self.scheduler.warmup_steps + 1, optimizer_steps)
 
         estimated_time = self._estimate_time(num_epochs)
@@ -537,14 +547,15 @@ class Trainer:
             },
         }
         torch.save(artifact, self.published_path)
-        # Merge & delete: the final model supersedes the training checkpoint.
-        if os.path.exists(self.training_path):
-            try:
-                os.remove(self.training_path)
-            except OSError:
-                pass
+        # Merge & delete: the final model supersedes the training checkpoints.
+        for stale in (self.training_path, self.best_path):
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
         print(f"  Published model -> {os.path.relpath(self.published_path)}"
-              f" (training checkpoint removed)")
+              f" (training checkpoints removed)")
 
     def load_checkpoint(self, path: str):
         """Resume from a full checkpoint (e.g. <name>_train.pt)."""

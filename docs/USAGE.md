@@ -70,11 +70,17 @@ python train.py --data <file> [options]
 | `--resume` | path | `None` | Resume training from a checkpoint `.pt`. |
 | `--char` | flag | off | Use the instant character-level tokenizer instead of BPE. |
 | `--name` | str | `<preset>` | Base model name. Produces `<name>.pt`, `<name>_train.pt`, and `<name>_best.pt`. |
+| `--grad-accum` | int | `1` | Gradient accumulation steps — simulates a larger batch without more VRAM. |
+| `--num-workers` | int | platform | DataLoader workers (`0` on Windows, `8` elsewhere). |
+| `--warmup-steps` | int | adaptive | LR warmup steps (default: capped at ~10% of the run). |
+| `--stride` | int | `seq_len/2` | Sliding-window stride between training sequences. |
+| `--no-compile` | flag | off | Disable `torch.compile` (auto-skipped if Triton is missing). |
+| `--seed` | int | `None` | Random seed for reproducible runs (torch/cuda/python/numpy). |
 
 **Set in code (not CLI flags)** — defaults in `neuralforge/training/trainer.py`:
-`compile_model=True` (torch.compile), `gradient_accumulation_steps=1`,
-`eval_interval=500`, `save_interval=1000`.
-Data loading uses `num_workers=8` (see `neuralforge/training/data.py`).
+`compile_model=True` (torch.compile), `eval_interval=500`, `save_interval=1000`.
+The LR warmup is adaptive: with no `--warmup-steps`, it's capped at ~10% of
+the run so short training sessions still reach the full LR and cosine decay.
 
 ### Train examples
 
@@ -120,6 +126,7 @@ python generate.py --checkpoint <file> [options]
 | `--top-p` | float | `None` | Nucleus sampling: keep the smallest set of tokens with cumulative probability ≥ p (e.g. `0.9`). |
 | `--repetition-penalty` | float | `1.0` | `>1.0` discourages repeating tokens already generated (try `1.1`–`1.3`). |
 | `--interactive` | flag | off | Prompt-response loop; type `quit` to exit. |
+| `--seed` | int | `None` | Random seed for reproducible generation. |
 
 ### Generate examples
 
@@ -164,7 +171,7 @@ the actual tokenizer vocab at train time.
 
 | | Character (`--char`) | BPE (default) |
 |---|---|---|
-| Tokenizer training | Instant | Slower (learns merges) |
+| Tokenizer training | Instant | Fast (heap-based merge learning) |
 | Output quality | Lower | Higher |
 | Best for | Quick experiments, tiny data | Serious runs, larger corpora |
 | Vocab control | Fixed (unique chars) | `--vocab-size` (e.g. 8000) |
@@ -205,9 +212,9 @@ python train.py --preset base --data data/train_large.txt \
 ```
 
 VRAM tips:
-1. **Lower `--batch-size` first**, then `--seq-len`, if you hit OOM.
+1. **Lower `--batch-size` first**, then `--seq-len`, if you hit OOM. To keep a large effective batch without the VRAM, raise `--grad-accum` instead.
 2. Mixed precision (AMP) is always on, so memory is already optimized.
-3. 32 GB system RAM is plenty for BPE training on `train_large.txt` and 8 data workers — VRAM is the bottleneck, not RAM.
+3. 32 GB system RAM is plenty for BPE training on `train_large.txt` — VRAM is the bottleneck, not RAM.
 
 ---
 

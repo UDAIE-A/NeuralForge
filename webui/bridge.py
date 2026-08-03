@@ -149,6 +149,7 @@ def generate(model, tokenizer, prompt, device, max_tokens=80, temperature=0.6,
     out = model.generate(
         x, max_new_tokens=max_tokens, temperature=temperature,
         top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+        eos_id=getattr(tokenizer, "eos_id", None),
     )
     gen_ids = out[0][len(ids):].tolist()
     return tokenizer.decode(gen_ids)
@@ -245,7 +246,7 @@ def run_autotutor(ckpt_rel, expected, prompt="hi", max_iters=20,
         BUS.update(error=str(e), running=False)
         BUS.emit({"type": "error", "message": str(e)})
     finally:
-        BUS.running = False
+        BUS.update(running=False)
 
 
 def start(ckpt_rel, expected, **kwargs):
