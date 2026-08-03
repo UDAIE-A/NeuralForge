@@ -36,11 +36,17 @@ class BPETokenizer:
         vocab = {bytes([i]).decode('latin-1'): base + i for i in range(256)}
         for token, idx in self.special_tokens.items():
             vocab[token] = idx
+        # IDs must stay contiguous (0..len(vocab)-1): a duplicate merge
+        # string is skipped, so assigning by merge-list position would leave
+        # a gap and push later ids beyond len(vocab), out of the embedding's
+        # range. A running counter keeps every id valid.
         offset = base + 256
-        for i, (first, second) in enumerate(self.merges):
+        next_id = offset
+        for first, second in self.merges:
             merged = first + second
             if merged not in vocab:
-                vocab[merged] = offset + i
+                vocab[merged] = next_id
+                next_id += 1
         self.vocab = vocab
         self.inverse_vocab = {v: k for k, v in vocab.items()}
         self.space_id = self.vocab.get(' ')
