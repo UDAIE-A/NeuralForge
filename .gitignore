@@ -54,3 +54,6 @@ data/train*.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated images
+outputs/

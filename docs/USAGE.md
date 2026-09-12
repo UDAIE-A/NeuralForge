@@ -58,7 +58,8 @@ python train.py --data <file> [options]
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--data` | path/str | **required** | Training text file (or a literal string of text). |
+| `--config` | path | `None` | JSON file of run settings (see `configs/`). Any key matching a flag below; an explicit flag still wins. |
+| `--data` | path/str | **required** | Training text file (or a literal string of text). May be supplied via `--config` instead. |
 | `--preset` | choice | `tiny` | Model size: `tiny`, `small`, `base`, `large`, `xl`, `xxl`. |
 | `--val-data` | path | `None` | Validation text file. If omitted, the last 5% of the training text is auto-held-out for validation. |
 | `--epochs` | int | `10` | Number of passes over the data. |
@@ -73,7 +74,12 @@ python train.py --data <file> [options]
 | `--grad-accum` | int | `1` | Gradient accumulation steps — simulates a larger batch without more VRAM. |
 | `--num-workers` | int | platform | DataLoader workers (`0` on Windows, `8` elsewhere). |
 | `--warmup-steps` | int | adaptive | LR warmup steps (default: capped at ~10% of the run). |
-| `--stride` | int | `seq_len/2` | Sliding-window stride between training sequences. |
+| `--stride` | int | `seq_len` | Sliding-window stride between training sequences. The default gives **non-overlapping** windows, so each token is seen once per epoch. A smaller stride shows every token multiple times and accelerates memorization. |
+| `--dropout` | float | preset (`0.1`) | Dropout probability. Raise it when validation loss stalls above training loss. |
+| `--early-stopping` | int | off | Stop after N consecutive evaluations with no validation improvement. |
+| `--val-fraction` | float | `0.05` | Fraction of the corpus held out for validation when `--val-data` is not given. |
+| `--max-steps` | int | `None` | Hard cap on optimizer steps regardless of `--epochs`, so a run can be sized in tokens rather than passes. |
+| `--d-model`, `--n-heads`, `--n-layers`, `--d-ff` | int | preset | Override individual preset dimensions to define a custom model size. |
 | `--no-compile` | flag | off | Disable `torch.compile` (auto-skipped if Triton is missing). |
 | `--seed` | int | `None` | Random seed for reproducible runs (torch/cuda/python/numpy). |
 | `--save-interval` | int | adaptive | Checkpoint save interval in optimizer steps (default: ~30 saves per run, so 300 steps = every 10, 3000 = every 100). |
@@ -230,8 +236,10 @@ VRAM tips:
 - The tokenizer is saved alongside as `tokenizer.pkl`. Published `<name>.pt`
   models also embed the tokenizer, so generation can usually load them without
   a separate `--tokenizer` argument.
-- On successful completion, `<name>_train.pt` is merged into `<name>.pt` and
-  deleted.
+- On successful completion, `<name>.pt` is published from the **best-validation**
+  weights (not the last epoch's) whenever a validation split exists; its
+  `meta['weights_from']` records which. Only the bulky resumable
+  `<name>_train.pt` is deleted — `<name>_best.pt` is kept.
 - **Architecture note:** the model now uses RoPE + SwiGLU + RMSNorm.
   Checkpoints from before that change won't load on `main`; check out the
   `v0-legacy-arch` tag to use them, then `git checkout main` to return.
@@ -264,6 +272,54 @@ python train.py --preset small --data data/train_large.txt --char --epochs 20 --
 ```
 
 ---
+
+## Changing clothes in a photo (`scripts/change_clothes.py`)
+
+Separate from the text model. Takes one photo of a person and repaints only the
+clothes from a text prompt - no training. Face, hair, skin and background are kept
+pixel-identical. Uses a clothing-segmentation model for the mask and a Stable
+Diffusion inpainting checkpoint to fill it (downloads ~2 GB once).
+
+```bash
+pip install -r requirements-image.txt
+python scripts/change_clothes.py photo.jpg "a black leather jacket and grey trousers" --cover-arms
+python scripts/change_clothes.py photo.jpg "a red floral summer dress" --num 4
+python scripts/change_clothes.py photo.jpg "grey hoodie" --parts upper
+```
+
+| Flag | Meaning |
+|---|---|
+| `--parts upper\|lower\|full` | which clothes to replace (default `full`) |
+| `--cover-arms` / `--cover-legs` | also repaint bare skin - needed for sleeves over a tank top, pants over shorts |
+| `--num N` / `--seed S` | number of variations / reproducible seed |
+| `--sdxl` | SDXL inpainting at 1024 px (slower, ~7 GB download) |
+| `--model ID` | any diffusers inpainting checkpoint |
+| `--mask-only` | write `<name>_mask.png` and stop, to check what will be repainted |
+
+Outputs go to `outputs/clothes/`. ~8 s per image on an RTX 3060 at 576x768.
+Only use it on photos of yourself or people who have agreed to it.
+
+Weights live in `checkpoints/` (gitignored). Fetch them once with
+`python scripts/download_image_models.py` (~7 GB); after that everything runs offline.
+
+### Teaching it one person (`scripts/train_identity_lora.py`)
+
+DreamBooth-style LoRA on Realistic Vision 5.1 from a folder of photos of one person.
+Auto-crops a person shot and a face close-up per photo, trains only rank-16 adapters on
+the UNet attention (3.2M params, ~2.2 GB VRAM, ~7 min for 800 steps on a 3060), then
+renders sample images.
+
+```bash
+python scripts/train_identity_lora.py --images "C:/photos/me" --name me
+python scripts/train_identity_lora.py --name me --sample-only --prompt "photo of ohwx person hiking"
+python scripts/change_clothes.py photo.jpg "a navy suit" --lora checkpoints/lora/me
+```
+
+Output: `checkpoints/lora/me/` with `pytorch_lora_weights.safetensors`, `token.txt`
+(`ohwx person` - use it in prompts), `train_crops/` (inspect these!) and `samples/`.
+Likeness scales with data: 3 clear faces gives "same kind of person"; 10-15 sharp,
+varied, overlay-free face photos gives a recognisable identity. Then raise `--steps`
+to 1200-1500. Only for your own photos or people who have agreed.
 
 ## Troubleshooting
 
