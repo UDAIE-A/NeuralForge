@@ -178,7 +178,10 @@ def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, p
 def load_pipe(model: str, sdxl: bool, device: str):
     from diffusers import AutoPipelineForInpainting, DPMSolverMultistepScheduler
 
-    pipe = AutoPipelineForInpainting.from_pretrained(model, torch_dtype=torch.float16, variant="fp16" if sdxl else None)
+    # SD1.5's safety checker runs on the cropped garment region and rejects ordinary clothed
+    # torsos most of the time (returning a black image), so it is disabled.
+    pipe = AutoPipelineForInpainting.from_pretrained(model, torch_dtype=torch.float16, variant="fp16" if sdxl else None,
+                                                     safety_checker=None, requires_safety_checker=False)
     # DPM++ 2M Karras: sharper fabric than the default sampler at the same step count
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(
         pipe.scheduler.config, algorithm_type="dpmsolver++", use_karras_sigmas=True, final_sigmas_type="sigma_min")
@@ -243,7 +246,7 @@ def main() -> None:
     found = sorted({LABELS[i] for i in np.unique(labels) if i in PARTS["full"]})
     print(f"segmented in {time.time() - t0:.1f}s, clothes found: {found or 'none'}")
 
-    masks = []
+    masks, kept = [], []
     if len(passes) > 1 or passes[0][0] != "full":
         labels = split_dress(labels)
     for parts_name, text in passes:
@@ -259,10 +262,16 @@ def main() -> None:
         mask = build_mask(labels, parts, args.grow, neckline, protect)
         coverage = np.asarray(mask).mean() / 255
         if coverage < 0.005:
-            raise SystemExit(f"'{parts_name}' mask covers {coverage:.1%} of the image - nothing to repaint. "
-                             f"Clothes found: {found or 'none'}. Try --parts full.")
+            # e.g. --lower on a half-body shot: nothing there, carry on with the other passes
+            print(f"pass '{parts_name}': skipped, only {coverage:.1%} of the image is {parts_name} clothing "
+                  f"(found: {', '.join(found) or 'none'})")
+            continue
         print(f"pass '{parts_name}': mask covers {coverage:.1%}  <- {text}")
+        kept.append((parts_name, text))
         masks.append(mask)
+    passes = kept
+    if not masks:
+        raise SystemExit(f"nothing to repaint - clothes found: {', '.join(found) or 'none'}. Try --parts full.")
     union = Image.fromarray(np.maximum.reduce([np.asarray(m) for m in masks]), "L")
     mask_path = save(union, args.out / f"{stem}_mask.png")
     print(f"mask -> {mask_path}")
@@ -306,32 +315,19 @@ def main() -> None:
             # crop to the clothes region so the garment is rendered at full resolution
             padding_mask_crop=32,
         )
-        flagged = getattr(out, "nsfw_content_detected", None)
-        return None if flagged and flagged[0] else out.images[0].resize(image.size)
+        return out.images[0].resize(image.size)
 
     seed = base_seed
     for i in range(args.num):
         t0 = time.time()
-        for attempt in range(3):
-            cur = img
-            for (parts_name, text), mask in zip(passes, masks):
-                result = run(cur, mask, text, 1.0, seed)
-                if result is None:
-                    break
-                cur = Image.composite(result, cur, feather(mask, args.res))
-            else:
-                break  # every pass succeeded
-            # the SD1.5 safety checker misfires on ordinary photos of people and returns a
-            # black image; bump the seed and try again instead of writing black clothes
-            print(f"    seed {seed} flagged by safety checker, retrying with seed {seed + 1}")
-            seed += 1
-        else:
-            print(f"[{i + 1}/{args.num}] skipped: 3 seeds in a row flagged")
-            continue
+        cur = img
+        for (parts_name, text), mask in zip(passes, masks):
+            result = run(cur, mask, text, 1.0, seed)
+            cur = Image.composite(result, cur, feather(mask, args.res))
         final = cur
         if hires:
             up = final.resize(img_hi.size, Image.LANCZOS)
-            refined = run(up, union_hi, ", ".join(t for _, t in passes), args.refine_strength, seed) or up
+            refined = run(up, union_hi, ", ".join(t for _, t in passes), args.refine_strength, seed)
             final = Image.composite(refined, img_hi, soft_hi)
         path = save(final, args.out / f"{stem}_{i}_seed{seed}.png")
         print(f"[{i + 1}/{args.num}] {time.time() - t0:.1f}s  seed={seed}  {final.size[0]}x{final.size[1]}  -> {path}")
