@@ -8,3 +8,4 @@ opencv-python-headless
 scipy
 pillow
 peft
+mediapipe

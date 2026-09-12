@@ -276,10 +276,10 @@ python train.py --preset small --data data/train_large.txt --char --epochs 20 --
 ## Changing clothes in a photo (`scripts/change_clothes.py`)
 
 Separate from the text model. Takes one photo of a person and repaints only the
-clothes from a text prompt - no training. Face, hair, hands and background are kept
-pixel-identical. Uses a clothing-segmentation model for the mask and a Stable
+clothes from a text prompt - no training. Face, hair, hands (found by a hand detector) and
+background are kept pixel-identical; a depth map of the photo keeps body proportions. Uses a clothing-segmentation model for the mask and a Stable
 Diffusion inpainting checkpoint (Realistic Vision 5.1) to fill it, then a hi-res
-refine pass for fabric detail. ~30 s per image on an RTX 3060 at 1024 px.
+refine pass for fabric detail. ~60 s per image on an RTX 3060 at 1024 px.
 
 ```bash
 pip install -r requirements-image.txt
@@ -296,6 +296,7 @@ python scripts/change_clothes.py photo.jpg "a navy suit with a white shirt" --co
 | `--grow N` | widen the mask (default 20 px) so the new garment can take its own shape |
 | `--no-neckline` | keep the old neckline exactly (by default shoulders/neck are repainted so any collar or straps are possible) |
 | `--hires 1024` / `--refine-strength 0.35` | refine pass resolution and strength; `--hires 0` disables it |
+| `--depth-scale 0.7` / `--edge-scale 0.6` | ControlNet weights: depth map keeps body volume/proportions; edge map keeps necklace/collarbones. `--no-control` skips both (faster) |
 | `--num N` / `--seed S` | number of variations / reproducible seed |
 | `--lora DIR` | identity LoRA from `train_identity_lora.py`, helps the repaint match the person |
 | `--sdxl` / `--model ID` | SDXL inpainting (1024 px, ~7 GB) or any other diffusers inpainting checkpoint |

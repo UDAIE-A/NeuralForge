@@ -5,7 +5,11 @@ Pipeline:
      changes the mask also covers the neck/shoulders down to the old neckline, so the new
      top can have any collar, straps or sleeves (face and hair are always protected).
   2. Inpaint the masked region with Stable Diffusion (DPM++ 2M Karras), cropped to the
-     clothes so the garment is rendered at full resolution.
+     clothes so the garment is rendered at full resolution. Two ControlNets guide it:
+     a depth map of the photo (body volume and proportions come from the person, not
+     from the model's imagination) and an edge map over skin/jewelry areas only (necklace,
+     collarbones, arms are redrawn where they are). Hands found by a hand detector are
+     never repainted, even with --cover-arms.
   3. Refine: upscale to --hires and run a low-strength second pass over the mask for
      sharper fabric and seams.
   4. Composite: original pixels are kept everywhere outside the feathered mask, so face,
@@ -67,6 +71,10 @@ SEG_MODEL = local_or_hub(CKPT / "segformer-clothes", "mattmdjaga/segformer_b2_cl
 # stable-diffusion-v1-5/stable-diffusion-inpainting
 SD15_INPAINT = local_or_hub(CKPT / "sd15-inpaint", "Uminosachi/realisticVisionV51_v51VAE-inpainting")
 SDXL_INPAINT = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+CN_DEPTH = local_or_hub(CKPT / "controlnet-depth", "lllyasviel/control_v11f1p_sd15_depth")
+CN_CANNY = local_or_hub(CKPT / "controlnet-canny", "lllyasviel/control_v11p_sd15_canny")
+DEPTH_MODEL = local_or_hub(CKPT / "depth-anything-small", "depth-anything/Depth-Anything-V2-Small-hf")
+HAND_MODEL = CKPT / "hand_landmarker.task"  # scripts/download_image_models.py fetches it
 
 NEGATIVE = ("deformed, disfigured, bad anatomy, extra limbs, mutated hands, blurry, low quality, "
             "lowres, jpeg artifacts, watermark, text, cropped, duplicate, nude, bare skin, "
@@ -150,7 +158,56 @@ def split_dress(labels: np.ndarray) -> np.ndarray:
     return out
 
 
-def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, protect: set[int]) -> Image.Image:
+def depth_map(img: Image.Image, old_clothes: np.ndarray, device: str) -> Image.Image:
+    """Depth Anything on the photo. Inside the old garment the map is blurred heavily: the
+    coarse body volume is kept (proportions), but the garment's own folds and outline are
+    not, so the new outfit is free to hang differently."""
+    from transformers import pipeline
+
+    est = pipeline("depth-estimation", model=DEPTH_MODEL, device=0 if device == "cuda" else -1)
+    depth = est(img)["depth"].convert("L").resize(img.size)
+    del est
+    torch.cuda.empty_cache()
+    coarse = depth.filter(ImageFilter.GaussianBlur(max(img.size) / 40))
+    depth = Image.composite(coarse, depth, Image.fromarray(old_clothes.astype(np.uint8) * 255))
+    return depth.convert("RGB")
+
+
+def edge_map(img: Image.Image, where: np.ndarray) -> Image.Image:
+    """Canny edges of the photo, kept only where `where` is True (skin/jewelry regions that
+    get repainted). Edges of the old garment must not be passed or its outline comes back."""
+    import cv2
+
+    edges = cv2.Canny(cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2GRAY), 80, 180)
+    edges[~where] = 0
+    return Image.fromarray(edges).convert("RGB")
+
+
+def hand_mask(img: Image.Image, grow: int) -> np.ndarray:
+    """Convex hull around every detected hand (MediaPipe hand landmarker), padded by `grow`."""
+    if not HAND_MODEL.exists():
+        return np.zeros((img.size[1], img.size[0]), bool)
+    import cv2
+    import mediapipe as mp
+    from mediapipe.tasks import python as mpp
+    from mediapipe.tasks.python import vision
+
+    opts = vision.HandLandmarkerOptions(base_options=mpp.BaseOptions(model_asset_path=str(HAND_MODEL)),
+                                        num_hands=2, min_hand_detection_confidence=0.3)
+    res = vision.HandLandmarker.create_from_options(opts).detect(
+        mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(np.asarray(img))))
+    w, h = img.size
+    m = np.zeros((h, w), np.uint8)
+    for hand in res.hand_landmarks:
+        pts = np.array([[int(l.x * w), int(l.y * h)] for l in hand], np.int32)
+        cv2.fillConvexPoly(m, cv2.convexHull(pts), 255)
+    if grow > 0 and m.any():
+        m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)))
+    return m.astype(bool)
+
+
+def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, protect: set[int],
+               hands: np.ndarray | None = None) -> Image.Image:
     import cv2
 
     mask = np.isin(labels, list(parts))
@@ -168,6 +225,8 @@ def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, p
     # shoulders are labelled 'arm'; inside the neckline zone they must be repaintable or the
     # old straps survive. Face/hair stay protected everywhere.
     keep &= ~(zone & ~np.isin(labels, list(PROTECT)))
+    if hands is not None:
+        keep |= hands  # SD1.5 cannot draw hands; keep the real ones whatever else is repainted
     keep = keep.astype(np.uint8)
     e = max(3, grow // 2)  # segmenter boundaries are fuzzy by ~8 px at 768
     keep = cv2.erode(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * e + 1, 2 * e + 1)))
@@ -175,13 +234,18 @@ def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, p
     return Image.fromarray(mask, "L")
 
 
-def load_pipe(model: str, sdxl: bool, device: str):
-    from diffusers import AutoPipelineForInpainting, DPMSolverMultistepScheduler
+def load_pipe(model: str, sdxl: bool, control: bool, device: str):
+    from diffusers import (AutoPipelineForInpainting, ControlNetModel, DPMSolverMultistepScheduler,
+                           StableDiffusionControlNetInpaintPipeline)
 
     # SD1.5's safety checker runs on the cropped garment region and rejects ordinary clothed
     # torsos most of the time (returning a black image), so it is disabled.
-    pipe = AutoPipelineForInpainting.from_pretrained(model, torch_dtype=torch.float16, variant="fp16" if sdxl else None,
-                                                     safety_checker=None, requires_safety_checker=False)
+    common = dict(torch_dtype=torch.float16, safety_checker=None, requires_safety_checker=False)
+    if control:
+        nets = [ControlNetModel.from_pretrained(m, torch_dtype=torch.float16, variant="fp16") for m in (CN_DEPTH, CN_CANNY)]
+        pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(model, controlnet=nets, **common)
+    else:
+        pipe = AutoPipelineForInpainting.from_pretrained(model, variant="fp16" if sdxl else None, **common)
     # DPM++ 2M Karras: sharper fabric than the default sampler at the same step count
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(
         pipe.scheduler.config, algorithm_type="dpmsolver++", use_karras_sigmas=True, final_sigmas_type="sigma_min")
@@ -214,6 +278,9 @@ def main() -> None:
     ap.add_argument("--res", type=int, default=768, help="working resolution of the first pass (longest side)")
     ap.add_argument("--hires", type=int, default=1024, help="resolution of the refine pass; 0 disables it")
     ap.add_argument("--refine-strength", type=float, default=0.35, help="how much the refine pass may change (0-1)")
+    ap.add_argument("--no-control", action="store_true", help="skip the depth/edge ControlNets (faster, less faithful body)")
+    ap.add_argument("--depth-scale", type=float, default=0.7, help="ControlNet weight for the depth map")
+    ap.add_argument("--edge-scale", type=float, default=0.6, help="ControlNet weight for the skin/jewelry edge map")
     ap.add_argument("--negative", default=NEGATIVE)
     ap.add_argument("--sdxl", action="store_true", help="use SDXL inpainting (slower, higher quality, 1024px)")
     ap.add_argument("--model", default=None, help="path or HF id of an inpainting checkpoint (overrides the default)")
@@ -246,6 +313,11 @@ def main() -> None:
     found = sorted({LABELS[i] for i in np.unique(labels) if i in PARTS["full"]})
     print(f"segmented in {time.time() - t0:.1f}s, clothes found: {found or 'none'}")
 
+    control = not args.no_control and not args.sdxl
+    # hands: keep only what the segmenter also calls skin, so fabric between the fingers is repainted
+    hands = hand_mask(img, args.grow // 2) & ~np.isin(labels, list(PARTS["full"]))
+    if hands.any():
+        print(f"hands detected, protected ({hands.mean():.1%} of the image)")
     masks, kept = [], []
     if len(passes) > 1 or passes[0][0] != "full":
         labels = split_dress(labels)
@@ -259,7 +331,7 @@ def main() -> None:
             else:
                 protect |= group
         neckline = parts_name != "lower" and not args.no_neckline
-        mask = build_mask(labels, parts, args.grow, neckline, protect)
+        mask = build_mask(labels, parts, args.grow, neckline, protect, hands)
         coverage = np.asarray(mask).mean() / 255
         if coverage < 0.005:
             # e.g. --lower on a half-body shot: nothing there, carry on with the other passes
@@ -278,7 +350,18 @@ def main() -> None:
     if args.mask_only:
         return
 
-    pipe = load_pipe(args.model or (SDXL_INPAINT if args.sdxl else SD15_INPAINT), args.sdxl, device)
+    guides = {}
+    if control:
+        old_clothes = np.isin(labels, list(PARTS["full"]))
+        # edges only from neck/collarbone/jewelry (the segmenter's 'face' label) inside the mask -
+        # never the old garment, background, or the thin strip beside arms/legs, where an outline
+        # edge makes the model draw a fabric hem along the limb
+        skin = (np.asarray(union) > 0) & (labels == FACE)
+        guides[img.size] = [depth_map(img, old_clothes, device), edge_map(img, skin)]
+        save(guides[img.size][0], args.out / f"{stem}_depth.png")
+        save(guides[img.size][1], args.out / f"{stem}_edges.png")
+
+    pipe = load_pipe(args.model or (SDXL_INPAINT if args.sdxl else SD15_INPAINT), args.sdxl, control, device)
     subject = "a person"
     if args.lora:
         pipe.load_lora_weights(str(args.lora))
@@ -303,19 +386,34 @@ def main() -> None:
         img_hi = fit_image(src, hires)
         union_hi = union.resize(img_hi.size, Image.BILINEAR)
         soft_hi = feather(union_hi, hires)
+        if control:
+            guides[img_hi.size] = [g.resize(img_hi.size, Image.BILINEAR) for g in guides[img.size]]
 
     def run(image, mask_img, text, strength, seed):
-        # a blurred mask makes the pipeline's own paste-back soft instead of a hard seam
-        soft_in = pipe.mask_processor.blur(mask_img, blur_factor=max(image.size) // 64)
+        """Inpaint `mask_img` on `image`. The mask's bounding box (+padding) is cut out and
+        rendered at the working resolution so the garment gets the full pixel budget, then
+        pasted back through a blurred mask so there is no hard seam."""
+        side = max(image.size)
+        x0, y0, x1, y1 = pipe.mask_processor.get_crop_region(mask_img, *image.size, pad=side // 24)
+        cw, ch = x1 - x0, y1 - y0
+        scale = side / max(cw, ch)
+        rw, rh = int(cw * scale) // 8 * 8, int(ch * scale) // 8 * 8
+        box = (x0, y0, x1, y1)
+        crop = image.crop(box).resize((rw, rh), Image.LANCZOS)
+        mcrop = mask_img.crop(box).resize((rw, rh), Image.BILINEAR)
+        soft_in = pipe.mask_processor.blur(mcrop, blur_factor=side // 64)
+        extra = {}
+        if control:
+            extra = dict(control_image=[g.crop(box).resize((rw, rh), Image.BILINEAR) for g in guides[image.size]],
+                         controlnet_conditioning_scale=[args.depth_scale, args.edge_scale])
         out = pipe(
-            prompt=prompt_for(text), negative_prompt=args.negative, image=image, mask_image=soft_in,
-            width=image.size[0], height=image.size[1],
-            num_inference_steps=args.steps, guidance_scale=args.guidance,
+            prompt=prompt_for(text), negative_prompt=args.negative, image=crop, mask_image=soft_in, **extra,
+            width=rw, height=rh, num_inference_steps=args.steps, guidance_scale=args.guidance,
             generator=torch.Generator(device="cpu").manual_seed(seed), strength=strength,
-            # crop to the clothes region so the garment is rendered at full resolution
-            padding_mask_crop=32,
-        )
-        return out.images[0].resize(image.size)
+        ).images[0]
+        result = image.copy()
+        result.paste(Image.composite(out, crop, soft_in).resize((cw, ch), Image.LANCZOS), box)
+        return result
 
     seed = base_seed
     for i in range(args.num):
