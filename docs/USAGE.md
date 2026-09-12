@@ -276,28 +276,32 @@ python train.py --preset small --data data/train_large.txt --char --epochs 20 --
 ## Changing clothes in a photo (`scripts/change_clothes.py`)
 
 Separate from the text model. Takes one photo of a person and repaints only the
-clothes from a text prompt - no training. Face, hair, skin and background are kept
+clothes from a text prompt - no training. Face, hair, hands and background are kept
 pixel-identical. Uses a clothing-segmentation model for the mask and a Stable
-Diffusion inpainting checkpoint to fill it (downloads ~2 GB once).
+Diffusion inpainting checkpoint (Realistic Vision 5.1) to fill it, then a hi-res
+refine pass for fabric detail. ~30 s per image on an RTX 3060 at 1024 px.
 
 ```bash
 pip install -r requirements-image.txt
-python scripts/change_clothes.py photo.jpg "a black leather jacket and grey trousers" --cover-arms
-python scripts/change_clothes.py photo.jpg "a red floral summer dress" --num 4
-python scripts/change_clothes.py photo.jpg "grey hoodie" --parts upper
+python scripts/change_clothes.py photo.jpg "a red summer dress" --num 4
+python scripts/change_clothes.py photo.jpg --upper "a white linen shirt" --lower "beige chinos"
+python scripts/change_clothes.py photo.jpg "a navy suit with a white shirt" --cover-arms
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--parts upper\|lower\|full` | which clothes to replace (default `full`) |
-| `--cover-arms` / `--cover-legs` | also repaint bare skin - needed for sleeves over a tank top, pants over shorts |
+| `"prompt"` + `--parts upper\|lower\|full` | one description for the whole outfit (default `full`) - best for dresses, sarees, suits |
+| `--upper "..." --lower "..."` | separate passes per garment, so colours/fabrics don't blend between them |
+| `--cover-arms` / `--cover-legs` | also repaint bare skin (sleeves over a tank top, trousers over a skirt); otherwise hands/legs are protected |
+| `--grow N` | widen the mask (default 20 px) so the new garment can take its own shape |
+| `--no-neckline` | keep the old neckline exactly (by default shoulders/neck are repainted so any collar or straps are possible) |
+| `--hires 1024` / `--refine-strength 0.35` | refine pass resolution and strength; `--hires 0` disables it |
 | `--num N` / `--seed S` | number of variations / reproducible seed |
-| `--sdxl` | SDXL inpainting at 1024 px (slower, ~7 GB download) |
-| `--model ID` | any diffusers inpainting checkpoint |
+| `--lora DIR` | identity LoRA from `train_identity_lora.py`, helps the repaint match the person |
+| `--sdxl` / `--model ID` | SDXL inpainting (1024 px, ~7 GB) or any other diffusers inpainting checkpoint |
 | `--mask-only` | write `<name>_mask.png` and stop, to check what will be repainted |
 
-Outputs go to `outputs/clothes/`. ~8 s per image on an RTX 3060 at 576x768.
-Only use it on photos of yourself or people who have agreed to it.
+Outputs go to `outputs/clothes/`. Only use it on photos of yourself or people who have agreed to it.
 
 Weights live in `checkpoints/` (gitignored). Fetch them once with
 `python scripts/download_image_models.py` (~7 GB); after that everything runs offline.
