@@ -100,7 +100,7 @@ def create_dataloaders(
     tokenizer,
     seq_len: int = 512,
     batch_size: int = 32,
-    stride: int = 256,
+    stride: Optional[int] = None,
     num_workers: int = 8,
     val_fraction: float = 0.05,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
@@ -119,6 +119,13 @@ def create_dataloaders(
     Returns:
         (train_loader, val_loader)
     """
+    # Default to non-overlapping windows. A stride below seq_len shows every
+    # token multiple times per epoch (the old default of 256 against a 512
+    # seq_len doubled it), which inflates apparent progress and accelerates
+    # memorization.
+    if stride is None:
+        stride = seq_len
+
     # If no explicit validation data is given, hold out the tail of the
     # training text as a contiguous validation split so named best/final
     # validation loss are actually meaningful. Split on raw text (not on

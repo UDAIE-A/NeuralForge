@@ -28,6 +28,9 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 
+from .lora import inject_lora, freeze_base, lora_state_dict, count_lora_params, merge_lora
+from .replay import ReplayBuffer, RegressionProbe
+
 
 class FeedbackStore:
     """Append-only JSONL store of human interactions."""
@@ -67,6 +70,14 @@ class OnlineLearner:
         steps: int = 6,
         feedback_path: str = None,
         eos_id: int = None,
+        replay_text: str = None,
+        replay_batch: int = 2,
+        replay_weight: float = 1.0,
+        replay_seq_len: int = 256,
+        replay_sequences: int = 256,
+        teach_with_dropout: bool = False,
+        lora_rank: int = None,
+        lora_alpha: float = 32.0,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -74,16 +85,54 @@ class OnlineLearner:
         self.lr = lr
         self.steps = max(1, int(steps))
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # Dropout during teaching made results non-deterministic (identical
+        # lesson sets produced different models run to run) and made the
+        # reported delta dishonest: loss_before was measured in eval mode with
+        # dropout off, loss_after in train mode with it on, so part of the
+        # "improvement" was just noise. Teach in eval mode by default.
+        self.teach_with_dropout = teach_with_dropout
         # Appending <eos> to every taught answer teaches the model to STOP
         # after a reply instead of running on and drifting into repetition loops.
         # The id is taken from the tokenizer so BPE and char vocabularies both
         # use their real <eos> (hardcoding 2 is wrong for BPE tokenizers).
         self.eos_id = eos_id if eos_id is not None else getattr(tokenizer, "eos_id", 2)
 
+        # LoRA mode: freeze the base model and train only a small adapter, so
+        # a bad lesson can be thrown away instead of having corrupted the
+        # weights. Off by default - it mutates the module in place, and the
+        # web UI shares one model object between chat and teaching.
+        self.lora_rank = lora_rank
+        if lora_rank:
+            inject_lora(self.model, rank=lora_rank, alpha=lora_alpha)
+            self.model.to(self.device)
+            params = freeze_base(self.model)
+            n_lora, n_total = count_lora_params(self.model)
+            print(f"  OnlineLearner: LoRA rank {lora_rank}, training "
+                  f"{n_lora/1e6:.2f}M / {n_total/1e6:.1f}M params "
+                  f"({100*n_lora/n_total:.2f}%)")
+        else:
+            params = list(self.model.parameters())
+
+        # Replay: without it, N steps on a single example walk the model off
+        # the pretraining distribution and general behaviour collapses.
+        self.replay = None
+        self.replay_batch = max(1, int(replay_batch))
+        self.replay_weight = float(replay_weight)
+        if replay_text:
+            self.replay = ReplayBuffer(replay_text, tokenizer,
+                                       seq_len=replay_seq_len,
+                                       max_sequences=replay_sequences)
+            print(f"  OnlineLearner: replay buffer with {len(self.replay)} windows "
+                  f"of {replay_seq_len} tokens")
+
+        # Regression probe over untaught control prompts (opt-in via
+        # watch_control_prompts).
+        self.probe = None
+
         # A dedicated optimizer with a small LR so a handful of online steps
         # can shift behaviour without catastrophically forgetting.
         self.optimizer = AdamW(
-            self.model.parameters(),
+            params,
             lr=lr,
             betas=(0.9, 0.95),
             eps=1e-8,
@@ -96,6 +145,7 @@ class OnlineLearner:
             "total_steps": 0,
             "last_loss_before": None,
             "last_loss_after": None,
+            "last_replay_loss": None,
         }
         self.feedback = FeedbackStore(
             feedback_path or os.path.join("checkpoints", "feedback.jsonl")
@@ -146,17 +196,112 @@ class OnlineLearner:
             [self._masked_targets(prompt_ids, seq)], dtype=torch.long, device=self.device
         )
 
-        self.model.train()
+        # eval() disables dropout but leaves autograd on, so the update is
+        # deterministic and loss_before/loss_after are measured alike.
+        self.model.train() if self.teach_with_dropout else self.model.eval()
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+
         last = None
+        last_replay = None
         for _ in range(self.steps):
             self.optimizer.zero_grad(set_to_none=True)
-            _, loss, _ = self.model(x, targets=y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            _, lesson_loss, _ = self.model(x, targets=y)
+            total = lesson_loss
+
+            # Anchor the update to the original distribution.
+            if self.replay is not None and self.replay_weight > 0:
+                rx, ry = self.replay.sample(self.replay_batch, self.device)
+                if rx is not None:
+                    _, replay_loss, _ = self.model(rx, targets=ry)
+                    total = lesson_loss + self.replay_weight * replay_loss
+                    last_replay = float(replay_loss.item())
+
+            total.backward()
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             self.optimizer.step()
-            last = float(loss.item())
+            last = float(lesson_loss.item())
+
         self.stats["total_steps"] += self.steps
+        self.stats["last_replay_loss"] = last_replay
         return last
+
+    def _batch(self, pairs):
+        """Pad a list of (prompt, answer) into one (x, y) batch.
+
+        Inputs pad with <pad>; targets pad with -1 so cross_entropy ignores
+        them, exactly as TextDataset does.
+        """
+        seqs, masks = [], []
+        for prompt, answer in pairs:
+            pids = self._encode(prompt)
+            aids = self._encode(answer) + [self.eos_id]
+            seq = pids + aids
+            if len(seq) < 2:
+                continue
+            seqs.append(seq)
+            masks.append(self._masked_targets(pids, seq))
+        if not seqs:
+            return None, None
+        width = max(len(s) for s in seqs) - 1
+        pad = getattr(self.tokenizer, "pad_id", 0)
+        xs = [s[:-1] + [pad] * (width - len(s) + 1) for s in seqs]
+        ys = [m + [-1] * (width - len(m)) for m in masks]
+        return (torch.tensor(xs, dtype=torch.long, device=self.device),
+                torch.tensor(ys, dtype=torch.long, device=self.device))
+
+    def teach_many(self, pairs, epochs: int = 8, batch_size: int = 4,
+                   shuffle: bool = True) -> dict:
+        """Teach several lessons JOINTLY rather than one after another.
+
+        Teaching sequentially - N steps on lesson 1, then N on lesson 2 - lets
+        whichever lesson ran last dominate the weights, which is why five facts
+        taught in a row collapsed an untaught "hello" into "Romeo and Romeo
+        and Romeo...". Every step here sees a mix of all the lessons plus a
+        replay batch, so no single example can pull the model onto itself.
+        """
+        import random as _random
+        with self._lock:
+            pairs = list(pairs)
+            before = [self.eval_loss(p, a) for p, a in pairs]
+
+            self.model.train() if self.teach_with_dropout else self.model.eval()
+            trainable = [p for p in self.model.parameters() if p.requires_grad]
+            order = list(range(len(pairs)))
+            steps = 0
+            for _ in range(epochs):
+                if shuffle:
+                    _random.shuffle(order)
+                for i in range(0, len(order), batch_size):
+                    chunk = [pairs[j] for j in order[i:i + batch_size]]
+                    x, y = self._batch(chunk)
+                    if x is None:
+                        continue
+                    self.optimizer.zero_grad(set_to_none=True)
+                    _, loss, _ = self.model(x, targets=y)
+                    total = loss
+                    if self.replay is not None and self.replay_weight > 0:
+                        rx, ry = self.replay.sample(self.replay_batch, self.device)
+                        if rx is not None:
+                            _, rloss, _ = self.model(rx, targets=ry)
+                            total = loss + self.replay_weight * rloss
+                    total.backward()
+                    torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                    self.optimizer.step()
+                    steps += 1
+
+            self.stats["total_steps"] += steps
+            after = [self.eval_loss(p, a) for p, a in pairs]
+            for (p, a), b, af in zip(pairs, before, after):
+                self._record("demonstrate", p, a, None, b, af)
+            mb = [v for v in before if v is not None]
+            ma = [v for v in after if v is not None]
+            return {
+                "type": "teach_many",
+                "lessons": len(pairs),
+                "steps": steps,
+                "loss_before": sum(mb) / len(mb) if mb else None,
+                "loss_after": sum(ma) / len(ma) if ma else None,
+            }
 
     # -- public feedback primitives ------------------------------------------
     def teach(self, prompt: str, answer: str) -> dict:
@@ -191,6 +336,22 @@ class OnlineLearner:
                 "loss_after": before,
                 "note": "logged only; supply a preferred answer to learn from it",
             }
+
+    # -- regression watching --------------------------------------------------
+    def watch_control_prompts(self, prompts, prompt_template="User: {prompt}\nAssistant:"):
+        """Snapshot untaught prompts so drift can be measured later.
+
+        Held-out perplexity is not a substitute: teaching five facts moved
+        pretraining loss +0.7% while an untaught "hello" degenerated into
+        "Romeo and Romeo and Romeo...". Watch behaviour, not prose.
+        """
+        self.probe = RegressionProbe(self.model, self.tokenizer,
+                                     prompt_template, self.device)
+        return self.probe.capture(list(prompts))
+
+    def check_regression(self):
+        """Report drift on the watched prompts. None if none are watched."""
+        return self.probe.check() if self.probe is not None else None
 
     # -- bookkeeping ----------------------------------------------------------
     def _record(self, kind, prompt, answer, rating, before, after):
@@ -230,22 +391,38 @@ class OnlineLearner:
             f.write("".join(lines))
         return path
 
-    def save(self, path: str):
-        """Persist the learned weights (+ config + tokenizer) so progress survives."""
+    def save(self, path: str, merge: bool = True):
+        """Persist the learned weights (+ config + tokenizer) so progress survives.
+
+        In LoRA mode the adapter is folded into the base weights by default, so
+        the result is an ordinary checkpoint that loads into an unmodified
+        NeuralForge. Pass merge=False to keep the model wrapped and store only
+        the adapter tensors (a few MB) alongside it.
+        """
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        artifact = {
-            "model_state_dict": self.model.state_dict(),
-            "config": self.config,
-            "tokenizer_obj": self.tokenizer,
-            "meta": {
-                "name": "learned",
-                "interactions": self.stats["interactions"],
-                "total_steps": self.stats["total_steps"],
-                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "source": "neuralforge.online.OnlineLearner",
-            },
+
+        meta = {
+            "name": "learned",
+            "interactions": self.stats["interactions"],
+            "total_steps": self.stats["total_steps"],
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "neuralforge.online.OnlineLearner",
+            "lora_rank": self.lora_rank,
+            "replay": None if self.replay is None else len(self.replay),
         }
+
+        artifact = {"config": self.config, "tokenizer_obj": self.tokenizer, "meta": meta}
+        if self.lora_rank and not merge:
+            artifact["adapter_state"] = lora_state_dict(self.model)
+            artifact["model_state_dict"] = None
+        else:
+            if self.lora_rank:
+                merged = merge_lora(self.model)
+                meta["lora_merged_layers"] = merged
+                self.lora_rank = None      # the wrapper is gone after merging
+            artifact["model_state_dict"] = self.model.state_dict()
+
         torch.save(artifact, path)
         return path

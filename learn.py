@@ -24,16 +24,23 @@ checkpoints/feedback.jsonl and can be exported to a corpus for offline training.
 import os
 import sys
 import argparse
-import threading
 
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from neuralforge.core import NeuralForge, ModelConfig
+# See generate.py: keep an unencodable character from killing the session.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
+from neuralforge.core import NeuralForge
 from neuralforge.tokenizer import BPETokenizer
 from neuralforge.tokenizer.char_tokenizer import CharTokenizer
 from neuralforge.learning import OnlineLearner
+# The model is trained on "User: <q>\nAssistant: <a>" turns, so live learning
+# must teach (and generate from) that same format - otherwise the prompt is
+# out of distribution and the feedback does not stick.
+from neuralforge.chat import CHAT_PROMPT_TMPL, decode_reply
 
 
 def load_for_learning(checkpoint_path: str, device: str):
@@ -63,7 +70,7 @@ def load_for_learning(checkpoint_path: str, device: str):
 
 def generate(model, tokenizer, prompt, device, max_tokens=120, temperature=0.8,
              top_k=50, top_p=0.9, repetition_penalty=1.1):
-    """Generate and return the full response string (CPU/GPU safe)."""
+    """Generate and return the cleaned assistant reply."""
     ids = tokenizer.encode(prompt, add_special_tokens=False)
     x = torch.tensor([ids], dtype=torch.long, device=device)
     out = model.generate(
@@ -71,8 +78,7 @@ def generate(model, tokenizer, prompt, device, max_tokens=120, temperature=0.8,
         top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
         eos_id=getattr(tokenizer, "eos_id", None),
     )
-    gen_ids = out[0][len(ids):].tolist()
-    return tokenizer.decode(gen_ids)
+    return decode_reply(tokenizer, ids, out[0].tolist())
 
 
 def run_interactive(args):
@@ -95,7 +101,12 @@ def run_interactive(args):
         if prompt.lower() in ("exit", "quit"):
             break
 
-        response = generate(model, tokenizer, prompt, device,
+        # Teach and generate from the same chat format the model was trained
+        # on; the taught prompt must match the generation prompt exactly, or
+        # the gradient steps will not transfer to what we generate.
+        prompt_fmt = CHAT_PROMPT_TMPL.format(prompt=prompt)
+
+        response = generate(model, tokenizer, prompt_fmt, device,
                             max_tokens=args.max_tokens, temperature=args.temperature,
                             top_k=args.top_k, top_p=args.top_p,
                             repetition_penalty=args.repetition_penalty)
@@ -109,17 +120,17 @@ def run_interactive(args):
         if not fb or fb.lower() == "s":
             continue
         if fb.lower() == "y":
-            res = learner.approve(prompt, response)
+            res = learner.approve(prompt_fmt, response)
             print(f"  [approved] loss {res['loss_before']:.4f} -> {res['loss_after']:.4f}")
         elif fb.lower() == "n":
             fix = input("  Better answer (or Enter to just log the rejection): ").strip()
-            res = learner.reject(prompt, response, preferred=fix or None)
+            res = learner.reject(prompt_fmt, response, preferred=fix or None)
             if fix:
                 print(f"  [corrected] loss {res['loss_before']:.4f} -> {res['loss_after']:.4f}")
             else:
                 print("  [rejected] logged only (no gradient step)")
         else:
-            res = learner.teach(prompt, fb)
+            res = learner.teach(prompt_fmt, fb)
             print(f"  [taught]   loss {res['loss_before']:.4f} -> {res['loss_after']:.4f}")
 
     _maybe_persist(learner, args)
@@ -198,6 +209,7 @@ def main():
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--top-p", type=float, default=0.9)
+    p.add_argument("--repetition-penalty", type=float, default=1.1)
     p.add_argument("--save", default=None, help="Save learned model to this path on exit")
     p.add_argument("--export", default=None, help="Export feedback corpus to this path on exit")
     args = p.parse_args()

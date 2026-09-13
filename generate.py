@@ -15,9 +15,17 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from neuralforge.core import NeuralForge, ModelConfig
+# Generated text can contain characters the console codepage cannot encode
+# (U+FFFD from a truncated multi-byte sequence, smart quotes carried in from
+# the corpus). Degrade those instead of dying with UnicodeEncodeError after
+# the model has already done the work.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
+from neuralforge.core import NeuralForge
 from neuralforge.tokenizer import BPETokenizer
 from neuralforge.tokenizer.char_tokenizer import CharTokenizer
+from neuralforge.chat import CHAT_PROMPT_TMPL, decode_reply
 
 
 def main():
@@ -112,8 +120,10 @@ def main():
                 if not prompt:
                     continue
                 
-                # Encode
-                tokens = tokenizer.encode(prompt, add_special_tokens=False)
+                # Encode - format as a chat turn so the model responds in
+                # the "Assistant: ..." style it was trained on.
+                prompt_fmt = CHAT_PROMPT_TMPL.format(prompt=prompt)
+                tokens = tokenizer.encode(prompt_fmt, add_special_tokens=False)
                 x = torch.tensor([tokens], dtype=torch.long, device=device)
                 
                 # Generate
@@ -128,8 +138,9 @@ def main():
                         eos_id=eos_id
                     )
 
-                # Decode
-                response = tokenizer.decode(generated[0].tolist())
+                # Decode only the generated continuation (sliced by token
+                # count, not by string prefix) and cut any leaked next turn.
+                response = decode_reply(tokenizer, tokens, generated[0].tolist())
                 print(f"NeuralForge: {response}\n")
                 
             except KeyboardInterrupt:

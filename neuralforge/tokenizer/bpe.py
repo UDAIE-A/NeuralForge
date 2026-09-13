@@ -11,9 +11,37 @@ import pickle
 import heapq
 
 
+# Pre-tokenization pattern (GPT-2 style, stdlib-re flavour).
+#
+# The critical property is that WHITESPACE IS PART OF THE TOKEN STREAM:
+#   * " ?[^\W\d_]+" attaches a leading space to a word, so the vocabulary can
+#     learn " the" / " Assistant" as single units - the single biggest quality
+#     win in GPT-2-era BPE, and impossible when spaces are stripped.
+#   * "\s+" captures runs of newlines/indentation as their own pieces, so
+#     "\n" and "\n\n" become real, learnable tokens.
+#
+# Version 1 of this tokenizer split on r'\S+' and rejoined words with a single
+# space token. That silently deleted every newline, tab and blank line from the
+# corpus before the model ever saw it, so a "User: q\nAssistant: a" turn
+# arrived as "User: q Assistant: a" and no turn boundary could ever be learned.
+_SPLIT_PATTERN = (
+    r"'(?:[sdmt]|ll|ve|re)"   # common English contractions
+    r"| ?[^\W\d_]+"           # letters, optionally with one leading space
+    r"| ?\d+"                 # digits, optionally with one leading space
+    r"| ?[^\s\w]+"            # punctuation runs, optionally with leading space
+    r"|\s+(?!\S)"             # trailing whitespace at end of text
+    r"|\s+"                   # any other whitespace run (newlines, indents)
+)
+_SPLIT_RE = re.compile(_SPLIT_PATTERN)
+
+# Bump when the pre-tokenization scheme changes. Tokenizers pickled before
+# versioning have no attribute at all, so always read it with getattr(..., 1).
+TOKENIZER_VERSION = 2
+
+
 class BPETokenizer:
     """Fast BPE tokenizer."""
-    
+
     def __init__(self):
         self.merges: List[Tuple[str, str]] = []
         self.vocab: Dict[str, int] = {}
@@ -21,7 +49,33 @@ class BPETokenizer:
         self.special_tokens = {'<pad>': 0, '<bos>': 1, '<eos>': 2, '<unk>': 3}
         self.is_trained = False
         self.space_id = None
+        self.version = TOKENIZER_VERSION
         self._ranks: Optional[Dict[Tuple[str, str], int]] = None
+
+    # ------------------------------------------------------------------
+    # Pre-tokenization
+    # ------------------------------------------------------------------
+    @property
+    def _is_legacy(self) -> bool:
+        """True for tokenizers trained before whitespace-preserving splitting.
+
+        Old checkpoints embed a pickled BPETokenizer whose __dict__ predates
+        the `version` attribute, so it must be read defensively. Those vocabs
+        were built from space-stripped pieces and would mis-encode under the
+        new splitter, so they keep the old behaviour for their whole life.
+        """
+        return getattr(self, 'version', 1) < 2
+
+    def _pieces(self, text: str) -> List[str]:
+        """Split text into pre-token pieces before BPE merging."""
+        if self._is_legacy:
+            return re.findall(r'\S+', text)
+        return _SPLIT_RE.findall(text)
+
+    @staticmethod
+    def _symbols(piece: str) -> List[str]:
+        """A piece as a list of single-byte symbols (latin-1 view of UTF-8)."""
+        return [bytes([b]).decode('latin-1') for b in piece.encode('utf-8')]
     
     def _build_vocab(self):
         """Build vocabulary from learned merges.
@@ -54,53 +108,60 @@ class BPETokenizer:
     def train(self, text: str, vocab_size: int = 32000, verbose: bool = False):
         """Train BPE tokenizer on text.
 
-        Merge selection uses a max-heap with lazy deletion plus per-word pair
-        counters and a pair->words index, so each merge only rescans the words
-        that actually contain the winning pair - not the entire corpus every
-        iteration (which was O(merges x corpus) and crawled on real data).
-        Counts are verified-exact against a full recount; on equal-count ties
-        the lexicographically smallest pair wins, so the merge *order* may
-        differ from older full-recount versions even though every chosen pair
-        is a true global max.
+        Pieces come from the whitespace-preserving splitter, so spaces and
+        newlines are ordinary symbols that merges can absorb (" the", "\\n\\n").
+
+        Identical pieces are collapsed into a frequency table before merging,
+        so a corpus with 17M word occurrences but 400k distinct pieces costs
+        400k entries, not 17M. Every count below is weighted by that frequency,
+        which is what makes training on a full corpus (rather than a truncated
+        sample) practical.
+
+        Merge selection uses a max-heap with lazy deletion plus per-piece pair
+        counters and a pair->pieces index, so each merge only rescans the
+        pieces that actually contain the winning pair - not the entire corpus
+        every iteration. On equal-count ties the lexicographically smallest
+        pair wins, so merge *order* is deterministic.
         """
         if verbose:
             print(f"  Training BPE on {len(text):,} characters...")
-        
+
         t0 = time.time()
-        
-        # Split into words. Case is preserved so the model can learn and
+
+        # Split into pieces. Case is preserved so the model can learn and
         # reproduce capital letters; lowercasing here silently removed every
         # uppercase character from the vocabulary.
-        words = re.findall(r'\S+', text)
+        self.version = TOKENIZER_VERSION
+        piece_freqs = Counter(self._pieces(text))
 
-        # Convert to tuples of byte characters. A space token is inserted
-        # BETWEEN words so the model can learn and reproduce word boundaries
-        # (otherwise decoded text has no spaces, e.g. "thesunisastar").
-        corpus = []
-        for word in words:
-            word_bytes = tuple(bytes([b]).decode('latin-1') for b in word.encode('utf-8'))
-            corpus.append(word_bytes)
-            corpus.append((' ',))  # word separator token
-        if corpus:
-            corpus = corpus[:-1]  # drop trailing separator
-        
+        # Convert to tuples of byte symbols, keeping a parallel frequency list.
+        corpus: List[Tuple[str, ...]] = []
+        freqs: List[int] = []
+        for piece, freq in piece_freqs.items():
+            corpus.append(tuple(self._symbols(piece)))
+            freqs.append(freq)
+
         if verbose:
-            print(f"  Tokenized into {len(corpus):,} words in {time.time()-t0:.1f}s")
-        
-        # Per-word counters of adjacent pairs, the global totals, and a
-        # pair -> word-indices index so merges only touch affected words.
+            total = sum(freqs)
+            print(f"  Tokenized into {total:,} pieces "
+                  f"({len(corpus):,} distinct) in {time.time()-t0:.1f}s")
+
+        # Per-piece counters of adjacent pairs, the frequency-weighted global
+        # totals, and a pair -> piece-indices index so merges only touch
+        # affected pieces.
         pair_to_words: Dict[Tuple[str, str], set] = defaultdict(set)
         pair_total: Counter = Counter()
         word_counters: List[Counter] = []
         for i, word in enumerate(corpus):
             counter = Counter()
+            freq = freqs[i]
             for j in range(len(word) - 1):
                 pair = (word[j], word[j + 1])
                 counter[pair] += 1
-                pair_total[pair] += 1
+                pair_total[pair] += freq
                 pair_to_words[pair].add(i)
             word_counters.append(counter)
-        
+
         # Max-heap of (-count, pair). Entries go stale whenever a count
         # changes; they're skipped lazily when popped.
         heap = [(-count, pair) for pair, count in pair_total.items()]
@@ -133,7 +194,8 @@ class BPETokenizer:
             for idx in list(pair_to_words[best_pair]):
                 word = corpus[idx]
                 old_counts = word_counters[idx]
-                
+                freq = freqs[idx]
+
                 # Build the merged word in a single pass.
                 new_word = []
                 j = 0
@@ -155,7 +217,7 @@ class BPETokenizer:
                 
                 keys = set(old_counts) | set(new_counts)
                 for pair in keys:
-                    delta = new_counts.get(pair, 0) - old_counts.get(pair, 0)
+                    delta = (new_counts.get(pair, 0) - old_counts.get(pair, 0)) * freq
                     if delta:
                         pair_total[pair] += delta
                         if pair_total[pair] <= 0:
@@ -205,32 +267,37 @@ class BPETokenizer:
         tokens = []
         if add_special_tokens:
             tokens.append(self.bos_id)
-        
-        words = re.findall(r'\S+', text)
-        for wi, word in enumerate(words):
-            word_bytes = [bytes([b]).decode('latin-1') for b in word.encode('utf-8')]
-            if not word_bytes:
+
+        # Legacy (version 1) vocabs were built from space-stripped pieces and
+        # relied on an explicit space token being injected between words. v2
+        # pieces carry their own whitespace, so nothing is injected.
+        legacy = self._is_legacy
+        pieces = self._pieces(text)
+        last = len(pieces) - 1
+        for pi, piece in enumerate(pieces):
+            symbols = self._symbols(piece)
+            if not symbols:
                 continue
             # Merge the lowest-rank adjacent pair until none remains.
             while True:
                 best_idx = -1
                 best_rank = float('inf')
-                for j in range(len(word_bytes) - 1):
-                    rank = ranks.get((word_bytes[j], word_bytes[j + 1]))
+                for j in range(len(symbols) - 1):
+                    rank = ranks.get((symbols[j], symbols[j + 1]))
                     if rank is not None and rank < best_rank:
                         best_rank, best_idx = rank, j
                 if best_idx < 0:
                     break
-                word_bytes[best_idx:best_idx + 2] = [word_bytes[best_idx] + word_bytes[best_idx + 1]]
+                symbols[best_idx:best_idx + 2] = [symbols[best_idx] + symbols[best_idx + 1]]
 
-            for token in word_bytes:
+            for token in symbols:
                 tokens.append(self.vocab.get(token, self.unk_id))
-            if wi != len(words) - 1 and self.space_id is not None:
+            if legacy and pi != last and self.space_id is not None:
                 tokens.append(self.space_id)
-        
+
         if add_special_tokens:
             tokens.append(self.eos_id)
-        
+
         return tokens
     
     def decode(self, ids: List[int]) -> str:
@@ -247,13 +314,15 @@ class BPETokenizer:
             else:
                 tokens.append('<unk>')
         
+        # Reassemble the latin-1 byte view into real UTF-8. errors='replace'
+        # keeps one malformed byte (a truncated multi-byte sequence at the end
+        # of a generation, say) from leaving the WHOLE string as mojibake.
         text = ''.join(tokens)
         try:
-            text_bytes = text.encode('latin-1')
-            text = text_bytes.decode('utf-8')
-        except (UnicodeDecodeError, UnicodeEncodeError):
+            text = text.encode('latin-1').decode('utf-8', errors='replace')
+        except UnicodeEncodeError:
             pass
-        
+
         return text
     
     def save(self, path: str):
@@ -265,6 +334,7 @@ class BPETokenizer:
                 'vocab': self.vocab,
                 'special_tokens': self.special_tokens,
                 'is_trained': self.is_trained,
+                'version': getattr(self, 'version', 1),
             }, f)
     
     @classmethod
@@ -277,6 +347,8 @@ class BPETokenizer:
         tokenizer.vocab = data['vocab']
         tokenizer.special_tokens = data['special_tokens']
         tokenizer.is_trained = data['is_trained']
+        # A file without a version key predates whitespace-preserving splitting.
+        tokenizer.version = data.get('version', 1)
         tokenizer.inverse_vocab = {v: k for k, v in tokenizer.vocab.items()}
         tokenizer.space_id = tokenizer.vocab.get(' ')
         tokenizer._ranks = None

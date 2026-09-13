@@ -125,6 +125,9 @@ class Trainer:
         model_name: str = "model",
         tokenizer=None,
         warmup_steps: Optional[int] = None,
+        early_stopping_patience: Optional[int] = None,
+        early_stopping_min_delta: float = 1e-4,
+        max_steps: Optional[int] = None,
     ):
         self.model = model
         # Named-model checkpointing. While training we keep a single rolling
@@ -152,6 +155,20 @@ class Trainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         # Explicit warmup override (CLI --warmup-steps); None means adaptive.
         self.warmup_steps = warmup_steps
+        # Early stopping: give up after N consecutive evaluations that fail to
+        # improve validation loss by min_delta. Without this a run keeps going
+        # long after validation has bottomed out, driving training loss toward
+        # memorization (a completed run showed train 0.31 vs val 2.89).
+        # None disables it.
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_min_delta = early_stopping_min_delta
+        self._evals_without_improvement = 0
+        self._early_stopped = False
+        # Hard cap on optimizer steps, independent of epochs. Lets a run be
+        # sized in tokens ("~100M tokens" = N steps) rather than in passes
+        # over the corpus. None means run the full epoch count.
+        self.max_steps = max_steps
+        self._step_limit_reached = False
         
         # Setup device - GPU only
         if not torch.cuda.is_available():
@@ -329,6 +346,8 @@ class Trainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
+                if self.max_steps is not None and self.global_step >= self.max_steps:
+                    self._step_limit_reached = True
             
             batch_time = time.time() - batch_start
             elapsed = time.time() - epoch_start
@@ -368,16 +387,18 @@ class Trainer:
 
             # Evaluation
             if self.global_step % self.eval_interval == 0 and self.val_loader:
-                val_loss = self.evaluate()
-                print(f"\n  >> Validation Loss: {val_loss:.4f}")
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    self.save_best()
-                self.model.train()
+                if self._evaluate_and_track(f"step {self.global_step}"):
+                    self.save_training()
+                    break
 
             # Roll the resumable training checkpoint periodically
             if self.global_step % self.save_interval == 0:
                 self.save_training()
+
+            if self._step_limit_reached:
+                print(f"\n  >> Reached --max-steps ({self.max_steps}); ending run.")
+                self.save_training()
+                break
         
         # End of epoch
         avg_epoch_loss = total_loss / len(self.train_loader)
@@ -402,6 +423,51 @@ class Trainer:
         
         return avg_epoch_loss
     
+    def _evaluate_and_track(self, label: str) -> bool:
+        """Evaluate, save on improvement, update early-stopping state.
+
+        Returns True when training should stop. Both the step-based and the
+        epoch-based evaluation paths go through here so the best checkpoint and
+        the patience counter can never disagree.
+        """
+        val_loss = self.evaluate()
+        improved = val_loss < self.best_val_loss - self.early_stopping_min_delta
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.save_best()
+
+        train_loss = self.epoch_losses[-1] if self.epoch_losses else None
+        gap = f" | train {train_loss:.4f}" if train_loss is not None else ""
+        marker = "  *best*" if improved else ""
+        print(f"\n  >> {label} validation loss: {val_loss:.4f}{gap}{marker}")
+
+        # A large train/val gap is the signature of memorization; say so once
+        # it is unambiguous rather than letting the run look healthy.
+        if train_loss is not None and train_loss > 0 and val_loss > 2.0 * train_loss:
+            print(f"     Warning: validation loss is {val_loss / train_loss:.1f}x "
+                  f"training loss - the model is memorizing the corpus. "
+                  f"Consider more data, higher --dropout, or fewer epochs.")
+
+        if self.early_stopping_patience is None:
+            self.model.train()
+            return False
+
+        if improved:
+            self._evals_without_improvement = 0
+        else:
+            self._evals_without_improvement += 1
+            print(f"     No improvement for {self._evals_without_improvement}"
+                  f"/{self.early_stopping_patience} evaluations")
+
+        self.model.train()
+        if self._evals_without_improvement >= self.early_stopping_patience:
+            self._early_stopped = True
+            print(f"\n  >> Early stop: validation loss has not improved for "
+                  f"{self.early_stopping_patience} evaluations "
+                  f"(best {self.best_val_loss:.4f}).")
+            return True
+        return False
+
     @torch.no_grad()
     def evaluate(self) -> float:
         """Evaluate on validation set."""
@@ -424,6 +490,10 @@ class Trainer:
         # Now that we know how many epochs we're running, size the LR decay to
         # the real number of optimizer steps so cosine decay actually completes.
         optimizer_steps = len(self.train_loader) * num_epochs // self.gradient_accumulation_steps
+        # Size the LR decay to the steps that will ACTUALLY run, so a
+        # step-capped run still completes its cosine schedule.
+        if self.max_steps is not None:
+            optimizer_steps = min(optimizer_steps, self.max_steps)
         # Cap warmup at ~10% of the run: the config default is 4000 steps,
         # which is longer than most short runs - the LR would keep ramping and
         # never reach cosine decay (wasting the whole run at tiny LR).
@@ -449,26 +519,31 @@ class Trainer:
                 if self._stop_requested:
                     print("\n  Training stopped early by request.")
                     break
+                if self._early_stopped or self._step_limit_reached:
+                    break
                 # Roll the resumable training checkpoint (single file)
                 self.save_training()
                 # Evaluate at the end of every epoch so the best model is saved
                 # reliably even on short runs (step-based eval can never fire).
-                if self.val_loader:
-                    val_loss = self.evaluate()
-                    print(f"  Epoch {epoch} validation loss: {val_loss:.4f}")
-                    if val_loss < self.best_val_loss:
-                        self.best_val_loss = val_loss
-                        self.save_best()
-                    self.model.train()
+                if self.val_loader and self._evaluate_and_track(f"epoch {epoch}"):
+                    break
 
             # Publish the clean final model and remove the training checkpoint.
+            # An early stop still publishes: the best weights are on disk and
+            # that is exactly the artifact worth keeping.
             if not self._stop_requested:
                 self.publish()
 
             total_time = time.time() - self.train_start_time
             print()
             print("=" * 70)
-            print("  TRAINING COMPLETE" if not self._stop_requested else "  TRAINING STOPPED")
+            if self._stop_requested:
+                headline = "  TRAINING STOPPED"
+            elif self._early_stopped:
+                headline = "  TRAINING COMPLETE (early stop)"
+            else:
+                headline = "  TRAINING COMPLETE"
+            print(headline)
             print("=" * 70)
             print(f"  Total time:    {format_time(total_time)}")
             if self.epoch_losses:
@@ -540,10 +615,31 @@ class Trainer:
 
         The published "<name>.pt" holds weights + config + the embedded
         tokenizer + metadata - no optimizer state - so it's a small, portable
-        artifact. The bulky "<name>_train.pt" is deleted afterwards.
+        artifact.
+
+        The weights published are the BEST-VALIDATION ones whenever a
+        validation split exists, not the last epoch's. Publishing the final
+        epoch meant that on an overfitting run - the normal case once training
+        loss falls well below validation loss - the artifact you kept was the
+        most-overfit checkpoint, and deleting "<name>_best.pt" immediately
+        afterwards destroyed the only good copy.
+
+        "<name>_best.pt" is therefore kept on disk as well; only the bulky
+        resumable "<name>_train.pt" is removed.
         """
+        source = 'final epoch'
+        state_dict = self._unwrapped_model().state_dict()
+        if os.path.exists(self.best_path):
+            try:
+                best = torch.load(self.best_path, map_location='cpu', weights_only=False)
+                state_dict = best['model_state_dict']
+                source = f"best val loss {self.best_val_loss:.4f}"
+            except Exception as e:  # corrupt/partial best file - fall back
+                print(f"  Warning: could not read {os.path.basename(self.best_path)}"
+                      f" ({e}); publishing final-epoch weights instead")
+
         artifact = {
-            'model_state_dict': self._unwrapped_model().state_dict(),
+            'model_state_dict': state_dict,
             'config': self.config,
             'tokenizer_obj': self.tokenizer,
             'meta': {
@@ -552,19 +648,20 @@ class Trainer:
                 'final_loss': self.epoch_losses[-1] if self.epoch_losses else None,
                 'best_val_loss': None if self.best_val_loss == float('inf') else self.best_val_loss,
                 'global_step': self.global_step,
+                'weights_from': source,
                 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
             },
         }
         torch.save(artifact, self.published_path)
-        # Merge & delete: the final model supersedes the training checkpoints.
-        for stale in (self.training_path, self.best_path):
-            if os.path.exists(stale):
-                try:
-                    os.remove(stale)
-                except OSError:
-                    pass
-        print(f"  Published model -> {os.path.relpath(self.published_path)}"
-              f" (training checkpoints removed)")
+        # Only the resumable training state is disposable; the best checkpoint
+        # stays so a published model can always be traced back to it.
+        if os.path.exists(self.training_path):
+            try:
+                os.remove(self.training_path)
+            except OSError:
+                pass
+        print(f"  Published model -> {os.path.relpath(self.published_path)} "
+              f"[weights: {source}]")
 
     def load_checkpoint(self, path: str):
         """Resume from a full checkpoint (e.g. <name>_train.pt)."""

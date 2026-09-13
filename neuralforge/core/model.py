@@ -298,6 +298,37 @@ class NeuralForge(nn.Module):
         
         return logits, loss, new_caches if use_cache else None
     
+    def _next_input(self, idx: torch.Tensor, kv_caches: Optional[list]):
+        """Pick the tokens to feed this step, and the cache to feed them with.
+
+        Returns (idx_cond, kv_caches). Three cases:
+
+          * no cache yet      -> feed the (truncated) prompt
+          * cache has room    -> feed just the last token
+          * cache is full     -> slide the window
+
+        Sliding matters: RoPE positions are read out of a table of exactly
+        max_seq_len rows, and during cached decoding the position index is the
+        cache length. Once that reached max_seq_len the table slice came back
+        EMPTY and generation died with "shape [B, 1, C] is invalid for input of
+        size 0" - so a model could never emit more tokens than its context
+        length. Here the cache is dropped and re-primed from the tail of the
+        sequence, which re-bases every position into the valid range.
+
+        Re-priming keeps three quarters of the window so it costs one extra
+        forward pass per max_seq_len/4 tokens, not one per token. Cached keys
+        carry rotations for their original absolute positions, so they cannot
+        simply be evicted from the front - the surviving keys would sit at the
+        wrong relative distance from the new query.
+        """
+        max_len = self.config.max_seq_len
+        if kv_caches is None:
+            return idx[:, -max_len:], None
+        if kv_caches[0][0].size(2) < max_len:
+            return idx[:, -1:], kv_caches
+        keep = max(1, (max_len * 3) // 4)
+        return idx[:, -keep:], None
+
     @torch.no_grad()
     def generate(
         self,
@@ -333,12 +364,7 @@ class NeuralForge(nn.Module):
         seen_tokens: Optional[List[set]] = None
 
         for _ in range(max_new_tokens):
-            # First step: feed the full prompt; subsequent steps: only last token
-            if kv_caches is None:
-                idx_cond = idx if idx.size(1) <= self.config.max_seq_len else \
-                           idx[:, -self.config.max_seq_len:]
-            else:
-                idx_cond = idx[:, -1:]
+            idx_cond, kv_caches = self._next_input(idx, kv_caches)
 
             # Forward pass with cache
             logits, _, kv_caches = self.forward(
@@ -420,12 +446,7 @@ class NeuralForge(nn.Module):
         seen_tokens: Optional[set] = None
 
         for _ in range(max_new_tokens):
-            if kv_caches is None:
-                idx_cond = idx if idx.size(1) <= self.config.max_seq_len else \
-                           idx[:, -self.config.max_seq_len:]
-            else:
-                idx_cond = idx[:, -1:]
-
+            idx_cond, kv_caches = self._next_input(idx, kv_caches)
             logits, _, kv_caches = self.forward(idx_cond, kv_caches=kv_caches, use_cache=True)
             logits = logits[:, -1, :]
 
