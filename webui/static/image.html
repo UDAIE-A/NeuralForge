@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NeuralForge Image Studio</title>
+<style>
+  :root {
+    --bg: #0d1017; --panel: #151922; --panel2: #1b2030; --border: #262d3d;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #10a37f; --accent2: #2563eb;
+    --danger: #e5534b; --warn: #d9a441; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  a { color: var(--accent); }
+  header { height: 56px; flex: 0 0 56px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; }
+  .brand .logo { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, var(--accent2), #a855f7); }
+  .brand small { color: var(--muted); font-weight: 400; }
+  .hdr-right { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .badge { background: var(--panel2); border: 1px solid var(--border); padding: 5px 10px; border-radius: 20px; display: flex; gap: 7px; align-items: center; color: var(--text); text-decoration: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .dot.off { background: var(--danger); }
+
+  .split { flex: 1; display: flex; min-height: 0; }
+  .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow-y: auto; }
+  .pane.left { border-right: 1px solid var(--border); }
+  .pane.right { background: var(--panel); }
+  .pane-head { padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+  .pane.right .pane-head { background: var(--panel); }
+  .pane-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  .pane-head .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .cards { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .card h3 { margin: 0 0 14px; font-size: 13px; font-weight: 650; display: flex; align-items: center; justify-content: space-between; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .field { margin-bottom: 12px; min-width: 0; }
+  .field label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font-size: 13.5px; font-family: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 56px; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 9px; padding: 10px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: var(--panel); border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  button.danger { background: var(--danger); }
+  button.small { padding: 6px 10px; font-size: 12.5px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .drop { border: 1.5px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted);
+    cursor: pointer; font-size: 13px; position: relative; min-height: 90px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+  .drop.over { border-color: var(--accent); color: var(--text); }
+  .drop img { max-height: 160px; max-width: 45%; border-radius: 8px; }
+  .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-bottom: 10px; user-select: none; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs button { background: var(--panel); border: 1px solid var(--border); color: var(--muted); font-weight: 500; padding: 7px 12px; }
+  .tabs button.on { color: var(--text); border-color: var(--accent); }
+  .log { background: #0a0d13; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: 12px/1.5 ui-monospace, Consolas, monospace;
+    color: #b7c0d1; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .gallery a { display: block; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); }
+  .gallery img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
+  .gallery .cap { font-size: 11px; color: var(--muted); padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { font-size: 12.5px; color: var(--muted); }
+  .status b { color: var(--text); }
+  .status .running { color: var(--warn); } .status .done { color: var(--accent); } .status .error { color: var(--danger); }
+  .lora { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel); }
+  .lora .name { font-weight: 600; }
+  .lora .thumbs { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; }
+  .lora .thumbs img { height: 64px; border-radius: 6px; }
+  .pill { font-size: 11px; padding: 2px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .pill.ok { color: var(--accent); border-color: var(--accent); }
+  @media (max-width: 900px) { .split { flex-direction: column; overflow-y: auto; } .pane { overflow: visible; } .pane.left { border-right: 0; border-bottom: 1px solid var(--border); } }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand"><div class="logo"></div><div>NeuralForge <small>Image Studio</small></div></div>
+    <div class="hdr-right">
+      <a class="badge" href="/">💬 Text Studio</a>
+      <span class="badge" id="engBadge">engines —</span>
+      <span class="badge"><span class="dot" id="busyDot"></span><span id="busyText">idle</span></span>
+    </div>
+  </header>
+
+  <div class="split">
+    <!-- LEFT: change clothes -->
+    <div class="pane left">
+      <div class="pane-head"><h2>👕 Change clothes</h2><div class="sub">Repaint only the clothes in a photo. Face, hair, hands and background stay pixel-identical.</div></div>
+      <div class="cards">
+        <div class="card">
+          <h3>Photo</h3>
+          <div class="drop" id="photoDrop"><span id="photoLabel">Drop a photo here or click to choose</span><img id="photoPrev" hidden><input type="file" id="photoFile" accept="image/*"></div>
+        </div>
+
+        <div class="card">
+          <h3>Outfit</h3>
+          <div class="tabs"><button class="on" data-mode="single">One prompt</button><button data-mode="split">Top + bottom</button><button data-mode="ref">From a garment photo</button></div>
+          <div id="modeSingle">
+            <div class="field"><label>Describe the outfit</label><textarea id="prompt" placeholder="a red floral summer dress"></textarea></div>
+            <div class="field"><label>Replace</label>
+              <select id="parts"><option value="full">full outfit</option><option value="upper">top only</option><option value="lower">skirt / trousers only</option></select></div>
+          </div>
+          <div id="modeSplit" hidden>
+            <div class="field"><label>Top</label><input type="text" id="upper" placeholder="a white linen shirt"></div>
+            <div class="field"><label>Bottom</label><input type="text" id="lower" placeholder="beige chinos"></div>
+            <div class="hint">Two passes, so the colours and fabrics of the two garments don't blend into each other.</div>
+          </div>
+          <div id="modeRef" hidden>
+            <div class="drop" id="refDrop" style="min-height:70px"><span id="refLabel">Drop a photo of the garment</span><img id="refPrev" hidden><input type="file" id="refFile" accept="image/*"></div>
+            <div class="field" style="margin-top:10px"><label>Short description of it</label><input type="text" id="refPrompt" placeholder="a lilac t-shirt with dark purple sleeves"></div>
+            <div class="field"><label>Replace</label>
+              <select id="refParts"><option value="upper">top only</option><option value="lower">skirt / trousers only</option><option value="full">full outfit</option></select></div>
+            <div class="hint">FLUX engine only. Turn on "repaint arms" below if the garment has sleeves.</div>
+          </div>
+          <label class="check"><input type="checkbox" id="coverArms"> Repaint bare arms (sleeves, jackets)</label>
+          <label class="check"><input type="checkbox" id="coverLegs"> Repaint bare legs (trousers over a skirt)</label>
+          <label class="check"><input type="checkbox" id="noNeckline"> Keep the old neckline exactly</label>
+        </div>
+
+        <div class="card">
+          <h3>Engine &amp; output</h3>
+          <div class="grid3">
+            <div class="field"><label>Engine</label><select id="engine"><option value="">auto</option><option value="flux">FLUX.2 klein</option><option value="sd15">SD1.5 + ControlNet</option></select></div>
+            <div class="field"><label>Variations</label><input type="number" id="num" value="2" min="1" max="16"></div>
+            <div class="field"><label>Seed</label><input type="number" id="seed" placeholder="random"></div>
+          </div>
+          <details>
+            <summary>Advanced</summary>
+            <div class="grid3">
+              <div class="field"><label>Steps</label><input type="number" id="steps" placeholder="flux 4 / sd15 30"></div>
+              <div class="field"><label>Guidance</label><input type="number" id="guidance" step="0.5" placeholder="sd15 7.0"></div>
+              <div class="field"><label>Resolution</label><input type="number" id="res" step="64" placeholder="1024 / 768"></div>
+              <div class="field"><label>Mask grow (px)</label><input type="number" id="grow" value="20"></div>
+              <div class="field"><label>Identity LoRA (sd15)</label><select id="lora"><option value="">none</option></select></div>
+              <div class="field"><label>LoRA scale</label><input type="number" id="loraScale" step="0.1" placeholder="0.8"></div>
+              <div class="field"><label>sd15: refine res</label><input type="number" id="hires" step="64" placeholder="1024, 0 = off"></div>
+              <div class="field"><label>sd15: refine strength</label><input type="number" id="refine" step="0.05" placeholder="0.35"></div>
+              <div class="field"><label>sd15: depth / edge</label><div class="row" style="flex-wrap:nowrap"><input type="number" id="depthScale" step="0.1" placeholder="0.7"><input type="number" id="edgeScale" step="0.1" placeholder="0.6"></div></div>
+            </div>
+            <div class="field"><label>Negative prompt (sd15)</label><input type="text" id="negative" placeholder="default"></div>
+            <label class="check"><input type="checkbox" id="noControl"> sd15: skip depth/edge ControlNets (faster)</label>
+            <label class="check"><input type="checkbox" id="sdxl"> sd15: use SDXL inpainting instead</label>
+          </details>
+          <div class="row" style="margin-top:8px">
+            <button id="runBtn">Generate</button>
+            <button class="ghost" id="maskBtn" title="Only build the mask, to check what will be repainted">Preview mask</button>
+            <button class="danger" id="stopBtn" hidden>Stop</button>
+            <span class="status" id="runStatus"></span>
+          </div>
+        </div>
+
+        <div class="card" id="resultCard" hidden>
+          <h3>Results <span class="pill" id="resultMeta"></span></h3>
+          <div class="gallery" id="gallery"></div>
+          <details style="margin-top:12px"><summary>Log</summary><div class="log" id="runLog"></div></details>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: identity LoRA -->
+    <div class="pane right">
+      <div class="pane-head"><h2>🧬 Identity LoRA</h2><div class="sub">Teach the SD1.5 engine one person from their photos. Only your own photos, or people who have agreed.</div></div>
+      <div class="cards">
+        <div class="card">
+          <h3>Train</h3>
+          <div class="drop" id="trainDrop"><span id="trainLabel">Drop 5–15 clear photos of one person (or click)</span><input type="file" id="trainFiles" accept="image/*" multiple></div>
+          <div class="gallery" id="trainThumbs" style="margin-top:10px; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));"></div>
+          <div class="grid2" style="margin-top:12px">
+            <div class="field"><label>Name</label><input type="text" id="tName" placeholder="me"></div>
+            <div class="field"><label>Token (use in prompts)</label><input type="text" id="tToken" value="ohwx person"></div>
+          </div>
+          <details>
+            <summary>Training settings</summary>
+            <div class="grid3">
+              <div class="field"><label>Steps</label><input type="number" id="tSteps" value="800"></div>
+              <div class="field"><label>Rank</label><input type="number" id="tRank" value="16"></div>
+              <div class="field"><label>Learning rate</label><input type="number" id="tLr" value="0.0001" step="0.00001"></div>
+              <div class="field"><label>Batch</label><input type="number" id="tBatch" value="2"></div>
+              <div class="field"><label>Resolution</label><input type="number" id="tRes" value="512" step="64"></div>
+              <div class="field"><label>Min face px</label><input type="number" id="tMinFace" value="48"></div>
+            </div>
+            <div class="hint">800 steps ≈ 7 min on an RTX 3060 at 512 px. More photos beats more steps; 1200–1500 steps once you have 10+ clear faces.</div>
+          </details>
+          <div class="row" style="margin-top:8px">
+            <button id="trainBtn">Train</button>
+            <button class="danger" id="trainStop" hidden>Stop</button>
+            <span class="status" id="trainStatus"></span>
+          </div>
+          <div class="log" id="trainLog" style="margin-top:12px" hidden></div>
+        </div>
+
+        <div class="card">
+          <h3>Render with a LoRA</h3>
+          <div class="grid2">
+            <div class="field"><label>LoRA</label><select id="sName"></select></div>
+            <div class="field"><label>Images</label><input type="number" id="sNum" value="2" min="1" max="8"></div>
+          </div>
+          <div class="field"><label>Prompt (blank = 4 built-in prompts)</label><input type="text" id="sPrompt" placeholder="photo of ohwx person at a cafe, natural light"></div>
+          <div class="grid2">
+            <div class="field"><label>LoRA scale</label><input type="number" id="sScale" value="0.9" step="0.1"></div>
+            <div class="field"><label>Seed</label><input type="number" id="sSeed" placeholder="random"></div>
+          </div>
+          <div class="row"><button id="sampleBtn">Render</button><span class="status" id="sampleStatus"></span></div>
+          <div class="gallery" id="sampleGallery" style="margin-top:12px"></div>
+        </div>
+
+        <div class="card">
+          <h3>Trained LoRAs <button class="ghost small" id="refreshLoras">⟳</button></h3>
+          <div id="loraList" class="hint">none yet</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, opts={}) => {
+  const r = await fetch('/api/image' + path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
+};
+const num = id => { const v = $(id).value; return v === '' ? null : Number(v); };
+const str = id => $(id).value.trim() || null;
+
+// ---------------------------------------------------------------- uploads
+async function uploadOne(file) {
+  const fd = new FormData(); fd.append('file', file);
+  return api('/upload', { method: 'POST', body: fd });
+}
+function wireDrop(dropId, inputId, onFiles) {
+  const drop = $(dropId), input = $(inputId);
+  ['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', ev => onFiles([...ev.dataTransfer.files]));
+  input.addEventListener('change', () => onFiles([...input.files]));
+}
+let photo = null, ref = null, trainFolder = null;
+wireDrop('photoDrop', 'photoFile', async files => {
+  if (!files[0]) return;
+  $('photoLabel').textContent = 'uploading…';
+  photo = await uploadOne(files[0]);
+  $('photoPrev').src = photo.url; $('photoPrev').hidden = false; $('photoLabel').textContent = photo.name;
+});
+wireDrop('refDrop', 'refFile', async files => {
+  if (!files[0]) return;
+  ref = await uploadOne(files[0]);
+  $('refPrev').src = ref.url; $('refPrev').hidden = false; $('refLabel').textContent = ref.name;
+});
+wireDrop('trainDrop', 'trainFiles', async files => {
+  files = files.filter(f => f.type.startsWith('image/'));
+  if (!files.length) return;
+  $('trainLabel').textContent = `uploading ${files.length} photos…`;
+  const fd = new FormData(); files.forEach(f => fd.append('files', f));
+  const r = await api('/upload_many', { method: 'POST', body: fd });
+  trainFolder = r.folder;
+  $('trainLabel').textContent = `${r.count} photos ready`;
+  $('trainThumbs').innerHTML = r.urls.map(u => `<a href="${u}" target="_blank"><img src="${u}"></a>`).join('');
+});
+
+// ---------------------------------------------------------------- outfit mode tabs
+let mode = 'single';
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+  mode = b.dataset.mode;
+  $('modeSingle').hidden = mode !== 'single'; $('modeSplit').hidden = mode !== 'split'; $('modeRef').hidden = mode !== 'ref';
+});
+
+// ---------------------------------------------------------------- jobs
+function gallery(el, urls, caps) {
+  el.innerHTML = urls.map((u, i) => `<a href="${u}" target="_blank"><img src="${u}" loading="lazy"><div class="cap">${(caps && caps[i]) || u.split('/').pop()}</div></a>`).join('');
+}
+function statusHtml(j) {
+  const cls = j.status === 'running' ? 'running' : (j.status === 'done' ? 'done' : 'error');
+  return `<span class="${cls}">${j.status}</span> · ${j.elapsed}s`;
+}
+async function poll(id, { onUpdate, onDone }) {
+  for (;;) {
+    let j;
+    try { j = await api('/jobs/' + id); } catch (e) { onUpdate({ status: 'error', log: [e.message], elapsed: 0, outputs: [] }); return; }
+    onUpdate(j);
+    if (j.status !== 'running' && j.status !== 'stopping') { onDone && onDone(j); return; }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+let runJob = null;
+async function runClothes(maskOnly) {
+  if (!photo) { alert('Upload a photo first'); return; }
+  const body = {
+    image: photo.path, num: num('num') || 1, seed: num('seed'), engine: str('engine'),
+    steps: num('steps'), guidance: num('guidance'), res: num('res'), grow: num('grow') ?? 20,
+    hires: num('hires'), refine_strength: num('refine'), depth_scale: num('depthScale'), edge_scale: num('edgeScale'),
+    negative: str('negative'), lora: str('lora'), lora_scale: num('loraScale'),
+    cover_arms: $('coverArms').checked, cover_legs: $('coverLegs').checked, no_neckline: $('noNeckline').checked,
+    no_control: $('noControl').checked, sdxl: $('sdxl').checked, mask_only: !!maskOnly,
+  };
+  if (mode === 'single') { body.prompt = str('prompt'); body.parts = $('parts').value; }
+  else if (mode === 'split') { body.upper = str('upper'); body.lower = str('lower'); }
+  else { if (!ref) { alert('Upload a garment photo'); return; } body.ref = ref.path; body.prompt = str('refPrompt') || 'the garment from the reference photo'; body.parts = $('refParts').value; body.engine = 'flux'; }
+  if (!(body.prompt || body.upper || body.lower)) { alert('Describe the outfit'); return; }
+  $('runBtn').disabled = $('maskBtn').disabled = true; $('stopBtn').hidden = false;
+  $('resultCard').hidden = false; $('gallery').innerHTML = ''; $('runLog').textContent = '';
+  try {
+    runJob = await api('/clothes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (e) { $('runStatus').innerHTML = `<span class="error">${e.message}</span>`; resetRun(); return; }
+  $('resultMeta').textContent = body.prompt || `${body.upper || ''} | ${body.lower || ''}`;
+  poll(runJob.id, {
+    onUpdate: j => { $('runStatus').innerHTML = statusHtml(j); $('runLog').textContent = j.log.join('\n'); $('runLog').scrollTop = 1e9;
+      if (j.outputs.length) gallery($('gallery'), j.outputs); },
+    onDone: resetRun,
+  });
+}
+function resetRun() { $('runBtn').disabled = $('maskBtn').disabled = false; $('stopBtn').hidden = true; refreshInfo(); }
+$('runBtn').onclick = () => runClothes(false);
+$('maskBtn').onclick = () => runClothes(true);
+$('stopBtn').onclick = () => runJob && api(`/jobs/${runJob.id}/stop`, { method: 'POST' });
+
+// ---------------------------------------------------------------- training
+let trainJob = null;
+$('trainBtn').onclick = async () => {
+  if (!trainFolder) { alert('Upload the photos first'); return; }
+  const body = { folder: trainFolder, name: str('tName') || 'me', token: str('tToken') || 'ohwx person',
+    steps: num('tSteps'), rank: num('tRank'), lr: num('tLr'), batch: num('tBatch'), res: num('tRes'), min_face: num('tMinFace') };
+  $('trainBtn').disabled = true; $('trainStop').hidden = false; $('trainLog').hidden = false; $('trainLog').textContent = '';
+  try { trainJob = await api('/train', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+  catch (e) { $('trainStatus').innerHTML = `<span class="error">${e.message}</span>`; $('trainBtn').disabled = false; $('trainStop').hidden = true; return; }
+  poll(trainJob.id, {
+    onUpdate: j => { $('trainStatus').innerHTML = statusHtml(j); $('trainLog').textContent = j.log.join('\n'); $('trainLog').scrollTop = 1e9; },
+    onDone: j => { $('trainBtn').disabled = false; $('trainStop').hidden = true; refreshInfo(); if (j.outputs.length) gallery($('sampleGallery'), j.outputs); },
+  });
+};
+$('trainStop').onclick = () => trainJob && api(`/jobs/${trainJob.id}/stop`, { method: 'POST' });
+
+$('sampleBtn').onclick = async () => {
+  const name = $('sName').value; if (!name) { alert('Train a LoRA first'); return; }
+  const body = { name, prompt: str('sPrompt'), num: num('sNum') || 1, lora_scale: num('sScale') ?? 0.9, seed: num('sSeed') };
+  $('sampleBtn').disabled = true; $('sampleGallery').innerHTML = '';
+  let j;
+  try { j = await api('/sample', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+  catch (e) { $('sampleStatus').innerHTML = `<span class="error">${e.message}</span>`; $('sampleBtn').disabled = false; return; }
+  const before = new Set((await api('/info')).loras.find(l => l.name === name)?.samples || []);
+  poll(j.id, {
+    onUpdate: x => { $('sampleStatus').innerHTML = statusHtml(x); },
+    onDone: x => { $('sampleBtn').disabled = false; gallery($('sampleGallery'), x.outputs.filter(u => !before.has(u)).concat(x.outputs.filter(u => before.has(u)))); refreshInfo(); },
+  });
+};
+
+// ---------------------------------------------------------------- info
+async function refreshInfo() {
+  let info; try { info = await api('/info'); } catch (e) { $('engBadge').textContent = 'server unreachable'; return; }
+  const e = info.engines;
+  $('engBadge').innerHTML = `flux <span class="pill ${e.flux ? 'ok' : ''}">${e.flux ? 'ready' : 'missing'}</span> sd15 <span class="pill ${e.sd15 ? 'ok' : ''}">${e.sd15 ? 'ready' : 'missing'}</span>`;
+  $('busyDot').className = 'dot ' + (info.busy ? 'off' : 'on'); $('busyText').textContent = info.busy ? `busy: ${info.busy.kind}` : 'idle';
+  const keep = $('lora').value, keepS = $('sName').value;
+  $('lora').innerHTML = '<option value="">none</option>' + info.loras.map(l => `<option value="${l.name}">${l.name} (${l.token})</option>`).join('');
+  $('sName').innerHTML = info.loras.map(l => `<option value="${l.name}">${l.name}</option>`).join('');
+  $('lora').value = keep; if (keepS) $('sName').value = keepS;
+  $('loraList').innerHTML = info.loras.length ? info.loras.map(l => `
+    <div class="lora"><div class="row" style="justify-content:space-between"><span class="name">${l.name}</span><span class="pill">${l.token}</span><span class="hint">${l.crops.length} crops · ${l.samples.length} samples</span></div>
+      <div class="thumbs">${l.samples.slice(-6).map(u => `<a href="${u}" target="_blank"><img src="${u}"></a>`).join('')}</div></div>`).join('') : 'none yet — train one on the left';
+}
+$('refreshLoras').onclick = refreshInfo;
+refreshInfo();
+setInterval(refreshInfo, 15000);
+</script>
+</body>
+</html>

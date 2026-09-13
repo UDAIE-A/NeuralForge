@@ -320,6 +320,20 @@ Weights live in `checkpoints/` (gitignored). Fetch them once with
 FLUX needs 12 GB VRAM: prompts are encoded first with the 8 GB text encoder, which is then
 dropped so the 7.7 GB transformer can stay resident.
 
+### Image Studio (web UI)
+
+Everything above, and the LoRA trainer below, from the browser:
+
+```bash
+venv/Scripts/python.exe -m webui.server      # then open http://127.0.0.1:8000/image
+```
+
+Left pane: drop a photo, describe the outfit (one prompt / top + bottom / from a garment
+photo), tick repaint-arms/legs, pick the engine, and Generate or Preview mask. Results,
+the mask and the job log appear below. Right pane: drop photos of one person, name the
+LoRA, Train (live log), then render prompts with any trained LoRA. Jobs run the CLI
+scripts as subprocesses, one at a time (one GPU); the Text Studio at `/` is unchanged.
+
 ### Teaching it one person (`scripts/train_identity_lora.py`)
 
 DreamBooth-style LoRA on Realistic Vision 5.1 from a folder of photos of one person.

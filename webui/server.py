@@ -14,12 +14,10 @@ import os
 import sys
 import glob
 import json
-import time
 import queue
 import pickle
 import asyncio
 import threading
-import re
 from typing import Optional
 
 import torch
@@ -30,6 +28,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from webui.image_api import router as image_router, OUT as IMAGE_OUT, LORA_DIR as IMAGE_LORA
+
 from neuralforge.core import NeuralForge, ModelConfig
 from neuralforge.tokenizer import BPETokenizer
 from neuralforge.tokenizer.char_tokenizer import CharTokenizer
@@ -37,36 +37,15 @@ from neuralforge.training import Trainer, create_dataloaders
 from neuralforge.training.data import read_text_input
 from neuralforge.training.trainer import get_gpu_stats
 from neuralforge.learning import OnlineLearner
-
-import webui.bridge as bridge
+from neuralforge.chat import (
+    CHAT_PROMPT_TMPL, clean_chat_reply, uses_legacy_tokenizer,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-# The conversational corpus formats turns as "User: <q>\nAssistant: <a>".
-# During generation the model keeps writing those markers for the NEXT turn
-# ("User: ..."), which would leak into the chat bubble - so we feed the prompt
-# in that format and cut the reply at the first marker that starts a new turn.
-CHAT_PROMPT_TMPL = "User: {prompt}\nAssistant:"
-# "User:" (or the "ser:" left over when a char vocab lacks 'U') at the start of
-# a line begins the next conversation turn - cut the reply there.
-_NEXT_TURN = re.compile(r"\n\s*u?ser\s*:|(?:\n|^)\s*assistant\s*:", re.IGNORECASE)
-
-
-def clean_chat_reply(text: str) -> tuple:
-    """Return (cleaned_text, next_turn_found).
-
-    Strips a leading role echo ("Assistant:" / "<unk>ser:") and cuts the reply
-    at the first marker that starts a new turn ("\nUser:" or the same text the
-    tokenizer produces when the vocab is missing capital letters, "ser:").
-    """
-    t = re.sub(r"^\s*(?:assistant|u?ser)\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
-    m = _NEXT_TURN.search(t)
-    if m:
-        return t[:m.start()].rstrip(), True
-    return t.rstrip(), False
-
 app = FastAPI(title="NeuralForge Studio")
+app.include_router(image_router)
 
 # ----------------------------------------------------------------------------
 # Shared training state (updated by the training thread, read by the metrics WS)
@@ -270,19 +249,17 @@ def _training_worker(params):
             # Tokenizer
             with TRAIN_LOCK:
                 TRAIN["status"] = "building tokenizer"
-            # Train the tokenizer on a representative SAMPLE of the corpus.
-            # The model below still trains on the ENTIRE corpus. The char
-            # tokenizer is instant and MUST see the full corpus, or rare
-            # characters (e.g. capital U/Q/X) fall out of the vocab and
-            # become <unk> in training data.
-            BPE_SAMPLE_CHARS = 4_000_000
-            tok_text = text if params.get("char") else text[:BPE_SAMPLE_CHARS]
+            # Both tokenizers see the FULL corpus. BPE training used to be
+            # capped at a 4M-char sample because it was too slow otherwise;
+            # collapsing identical pieces into a frequency table removed that
+            # cost, and sampling meant rare-but-real tokens fell out of the
+            # vocab and became <unk> in the training data.
             if params.get("char"):
                 tokenizer = CharTokenizer()
-                tokenizer.train(tok_text)
+                tokenizer.train(text)
             else:
                 tokenizer = BPETokenizer()
-                tokenizer.train(tok_text, vocab_size=int(params.get("vocab_size", 8000)))
+                tokenizer.train(text, vocab_size=int(params.get("vocab_size", 8000)))
 
             # Config + model
             config = ModelConfig.from_preset(params["preset"])
@@ -344,6 +321,11 @@ def _training_worker(params):
 @app.get("/")
 def index():
     return FileResponse(os.path.join(STATIC, "index.html"))
+
+
+@app.get("/image")
+def image_studio():
+    return FileResponse(os.path.join(STATIC, "image.html"))
 
 
 @app.get("/api/info")
@@ -483,69 +465,6 @@ async def learn_export(req: dict):
     return {"ok": True, "path": out}
 
 
-# ----------------------------------------------------------------------------
-# Auto-Tutor bridge (live agent<->model teach-loop)
-# ----------------------------------------------------------------------------
-@app.post("/api/bridge/start")
-async def bridge_start(req: dict):
-    ckpt = req.get("checkpoint")
-    if not ckpt:
-        return JSONResponse({"ok": False, "error": "No model selected"}, status_code=400)
-    expected = (req.get("expected") or "Hello! How can I help you today?").strip()
-    prompt = (req.get("prompt") or "hi").strip()
-    try:
-        ok, msg = bridge.start(
-            ckpt,
-            expected,
-            prompt=prompt,
-            max_iters=int(req.get("max_iters", 20)),
-            steps=int(req.get("steps", 10)),
-            lr=float(req.get("lr", 1e-4)),
-            temperature=float(req.get("temperature", 0.6)),
-            max_tokens=int(req.get("max_tokens", 80)),
-            threshold=float(req.get("threshold", 0.40)),
-        )
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-    return {"ok": ok, "message": msg}
-
-
-@app.post("/api/bridge/stop")
-def bridge_stop():
-    bridge.stop()
-    return {"ok": True}
-
-
-@app.get("/api/bridge/status")
-def bridge_status():
-    with bridge.BUS.lock:
-        return dict(bridge.BUS.status)
-
-
-@app.get("/bridge")
-def bridge_page():
-    return FileResponse(os.path.join(STATIC, "bridge.html"))
-
-
-@app.websocket("/ws/bridge")
-async def ws_bridge(ws: WebSocket):
-    await ws.accept()
-    loop = asyncio.get_event_loop()
-    q = bridge.BUS.subscribe()
-    # Push current status immediately so the page is never blank.
-    try:
-        with bridge.BUS.lock:
-            await ws.send_text(json.dumps({"type": "status", **bridge.BUS.status}))
-        while True:
-            kind, val = await loop.run_in_executor(None, q.get)
-            await ws.send_text(json.dumps(val))
-    except (WebSocketDisconnect, RuntimeError):
-        bridge.BUS.unsubscribe(q)
-        return
-    except Exception:  # noqa
-        bridge.BUS.unsubscribe(q)
-
-
 @app.get("/api/train/status")
 def train_status():
     with TRAIN_LOCK:
@@ -604,6 +523,7 @@ async def ws_chat(ws: WebSocket):
             def worker():
                 try:
                     eos = getattr(tokenizer, "eos_id", None)
+                    legacy = uses_legacy_tokenizer(tokenizer)
                     chat_prompt = CHAT_PROMPT_TMPL.format(prompt=prompt)
                     ids = tokenizer.encode(chat_prompt, add_special_tokens=False)
                     x = torch.tensor([ids], dtype=torch.long, device="cuda")
@@ -611,7 +531,8 @@ async def ws_chat(ws: WebSocket):
                     prev_text = ""
                     for tok in model.generate_stream(x, eos_id=eos, **opts):
                         gen_ids.append(tok)
-                        text, next_turn = clean_chat_reply(tokenizer.decode(gen_ids))
+                        text, next_turn = clean_chat_reply(
+                            tokenizer.decode(gen_ids), legacy=legacy)
                         if len(text) >= len(prev_text):
                             delta = text[len(prev_text):]
                             prev_text = text
@@ -642,31 +563,15 @@ async def ws_chat(ws: WebSocket):
 # Serve static assets (if any are added later)
 if os.path.isdir(STATIC):
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+# Image Studio results and LoRA samples/crops
+IMAGE_OUT.mkdir(parents=True, exist_ok=True)
+IMAGE_LORA.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(IMAGE_OUT)), name="outputs")
+app.mount("/lora", StaticFiles(directory=str(IMAGE_LORA)), name="lora")
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    # ---- Unattended auto-start: kick the teach-loop on boot so it runs with
-    #      no browser open and no human/agent in the loop. The web UI can still
-    #      watch it live at /bridge (and stop/restart it from there). ----
-    def _autostart_bridge():
-        try:
-            ckpt = "runs/ui/tiny_train.pt"
-            if os.path.exists(os.path.join(ROOT, ckpt)):
-                ok, msg = bridge.start(
-                    ckpt,
-                    expected="Hello! How can I help you today?",
-                    prompt="hi", max_iters=20, steps=12, lr=1e-4,
-                    continuous=True,
-                )
-                print(f"  [bridge] auto-start: {msg} ({ckpt})")
-            else:
-                print("  [bridge] auto-start skipped: checkpoint not found")
-        except Exception as e:  # noqa
-            print(f"  [bridge] auto-start failed: {e}")
-
-    threading.Thread(target=_autostart_bridge, daemon=True).start()
 
     print("\n  NeuralForge Studio -> http://127.0.0.1:8000\n")
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
