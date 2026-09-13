@@ -276,36 +276,49 @@ python train.py --preset small --data data/train_large.txt --char --epochs 20 --
 ## Changing clothes in a photo (`scripts/change_clothes.py`)
 
 Separate from the text model. Takes one photo of a person and repaints only the
-clothes from a text prompt - no training. Face, hair, hands (found by a hand detector) and
-background are kept pixel-identical; a depth map of the photo keeps body proportions. Uses a clothing-segmentation model for the mask and a Stable
-Diffusion inpainting checkpoint (Realistic Vision 5.1) to fill it, then a hi-res
-refine pass for fabric detail. ~60 s per image on an RTX 3060 at 1024 px.
+clothes - from a text prompt or from a photo of a garment - with no training. Face,
+hair, hands (found by a hand detector) and background are kept pixel-identical. A
+clothing-segmentation model builds the mask; an inpainting model fills it.
+
+Two engines, picked automatically by what is in `checkpoints/`:
+
+| | `flux` (default when present) | `sd15` |
+|---|---|---|
+| Model | FLUX.2 klein 4B, Apache-2.0 | Realistic Vision 5.1 inpainting + depth/edge ControlNets |
+| Download | ~16 GB (`download_image_models.py --flux`) | ~8.5 GB |
+| Per image (RTX 3060) | ~35 s single prompt, ~65 s `--upper`+`--lower` | ~60 s |
+| Quality | body fit, anatomy, fabric and prompt-following are clearly better | ok |
+| Extras | `--ref garment.jpg` puts a photographed garment on the person | `--lora`, `--sdxl` |
 
 ```bash
 pip install -r requirements-image.txt
+python scripts/download_image_models.py --flux            # add --flux-dir D:/models/flux2-klein-4b to keep it off C:
 python scripts/change_clothes.py photo.jpg "a red summer dress" --num 4
 python scripts/change_clothes.py photo.jpg --upper "a white linen shirt" --lower "beige chinos"
-python scripts/change_clothes.py photo.jpg "a navy suit with a white shirt" --cover-arms
+python scripts/change_clothes.py photo.jpg "the t-shirt from the reference" --parts upper --cover-arms --ref shirt.jpg
+python scripts/change_clothes.py photo.jpg "a navy suit with a white shirt" --cover-arms --engine sd15
 ```
 
 | Flag | Meaning |
 |---|---|
 | `"prompt"` + `--parts upper\|lower\|full` | one description for the whole outfit (default `full`) - best for dresses, sarees, suits |
 | `--upper "..." --lower "..."` | separate passes per garment, so colours/fabrics don't blend between them |
-| `--cover-arms` / `--cover-legs` | also repaint bare skin (sleeves over a tank top, trousers over a skirt); otherwise hands/legs are protected |
+| `--ref photo.jpg` | flux: a photo of the garment to wear; describe it briefly in the prompt too |
+| `--cover-arms` / `--cover-legs` | also repaint bare skin (sleeves over a tank top, trousers over a skirt); hands are still protected |
 | `--grow N` | widen the mask (default 20 px) so the new garment can take its own shape |
 | `--no-neckline` | keep the old neckline exactly (by default shoulders/neck are repainted so any collar or straps are possible) |
-| `--hires 1024` / `--refine-strength 0.35` | refine pass resolution and strength; `--hires 0` disables it |
-| `--depth-scale 0.7` / `--edge-scale 0.6` | ControlNet weights: depth map keeps body volume/proportions; edge map keeps necklace/collarbones. `--no-control` skips both (faster) |
 | `--num N` / `--seed S` | number of variations / reproducible seed |
-| `--lora DIR` | identity LoRA from `train_identity_lora.py`, helps the repaint match the person |
-| `--sdxl` / `--model ID` | SDXL inpainting (1024 px, ~7 GB) or any other diffusers inpainting checkpoint |
+| `--engine flux\|sd15` | force an engine; `--lora` and `--sdxl` imply `sd15` |
+| `--steps` / `--guidance` / `--res` | per-engine defaults: flux 4 / 1.0 / 1024, sd15 30 / 7.0 / 768 |
+| `--hires` / `--refine-strength` / `--no-control` / `--depth-scale` / `--edge-scale` | sd15 only: refine pass and ControlNet weights |
 | `--mask-only` | write `<name>_mask.png` and stop, to check what will be repainted |
 
 Outputs go to `outputs/clothes/`. Only use it on photos of yourself or people who have agreed to it.
 
 Weights live in `checkpoints/` (gitignored). Fetch them once with
-`python scripts/download_image_models.py` (~7 GB); after that everything runs offline.
+`python scripts/download_image_models.py [--flux]`; after that everything runs offline.
+FLUX needs 12 GB VRAM: prompts are encoded first with the 8 GB text encoder, which is then
+dropped so the 7.7 GB transformer can stay resident.
 
 ### Teaching it one person (`scripts/train_identity_lora.py`)
 

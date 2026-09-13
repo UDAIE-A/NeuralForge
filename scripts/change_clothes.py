@@ -4,22 +4,24 @@ Pipeline:
   1. Segment the clothing (SegFormer trained on fashion parsing) -> mask. For upper-body
      changes the mask also covers the neck/shoulders down to the old neckline, so the new
      top can have any collar, straps or sleeves (face and hair are always protected).
-  2. Inpaint the masked region with Stable Diffusion (DPM++ 2M Karras), cropped to the
-     clothes so the garment is rendered at full resolution. Two ControlNets guide it:
-     a depth map of the photo (body volume and proportions come from the person, not
-     from the model's imagination) and an edge map over skin/jewelry areas only (necklace,
-     collarbones, arms are redrawn where they are). Hands found by a hand detector are
-     never repainted, even with --cover-arms.
-  3. Refine: upscale to --hires and run a low-strength second pass over the mask for
-     sharper fabric and seams.
-  4. Composite: original pixels are kept everywhere outside the feathered mask, so face,
+  2. Inpaint the masked region, cropped to the clothes so the garment is rendered at full
+     resolution. Hands found by a hand detector are never repainted, even with --cover-arms.
+     Engines (--engine, auto-picked by what is in checkpoints/):
+       flux  FLUX.2 klein 4B (default when present): 1024 px, 4 steps, one pass. Much better
+             anatomy, fabric and prompt following; --ref lets you pass a photo of a garment
+             instead of describing it.
+       sd15  Realistic Vision 5.1 inpainting guided by two ControlNets (a depth map of the
+             photo for body volume/proportions, an edge map of the neck/jewelry region) and a
+             hi-res refine pass. Faster to download, weaker model.
+  3. Composite: original pixels are kept everywhere outside the feathered mask, so face,
      hair, skin and background come back pixel-identical.
 
 Usage:
   venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "a black leather jacket and blue jeans"
   venv/Scripts/python.exe scripts/change_clothes.py photo.jpg --upper "a white linen shirt" --lower "beige chinos"
   venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "a red summer dress" --num 4
-  venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "grey hoodie" --parts upper --lora checkpoints/lora/me
+  venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "the top from the reference photo" --parts upper --ref shirt.jpg
+  venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "grey hoodie" --parts upper --engine sd15 --lora checkpoints/lora/me
 
 --upper/--lower run as two passes, so each garment follows its own description instead of
 SD1.5 blending them ("white top, denim skirt" -> denim top). One prompt + --parts full is
@@ -75,6 +77,14 @@ CN_DEPTH = local_or_hub(CKPT / "controlnet-depth", "lllyasviel/control_v11f1p_sd
 CN_CANNY = local_or_hub(CKPT / "controlnet-canny", "lllyasviel/control_v11p_sd15_canny")
 DEPTH_MODEL = local_or_hub(CKPT / "depth-anything-small", "depth-anything/Depth-Anything-V2-Small-hf")
 HAND_MODEL = CKPT / "hand_landmarker.task"  # scripts/download_image_models.py fetches it
+FLUX_DIR = CKPT / "flux2-klein-4b"  # ~16 GB; may be a junction to another drive
+FLUX_INPAINT = local_or_hub(FLUX_DIR, "black-forest-labs/FLUX.2-klein-4B")
+
+# per-engine defaults for the flags that are left unset
+DEFAULTS = {
+    "flux": dict(res=1024, hires=0, steps=4, guidance=1.0),   # step-distilled: 4 steps, CFG ignored
+    "sd15": dict(res=768, hires=1024, steps=30, guidance=7.0),
+}
 
 NEGATIVE = ("deformed, disfigured, bad anatomy, extra limbs, mutated hands, blurry, low quality, "
             "lowres, jpeg artifacts, watermark, text, cropped, duplicate, nude, bare skin, "
@@ -94,11 +104,11 @@ def save(img: Image.Image, path: Path) -> Path:
         return alt
 
 
-def fit_image(img: Image.Image, max_side: int) -> Image.Image:
-    """Downscale so the longest side <= max_side, rounded to a multiple of 8."""
+def fit_image(img: Image.Image, max_side: int, mult: int = 8) -> Image.Image:
+    """Downscale so the longest side <= max_side, rounded down to a multiple of `mult`."""
     w, h = img.size
     scale = min(1.0, max_side / max(w, h))
-    w, h = int(w * scale) // 8 * 8, int(h * scale) // 8 * 8
+    w, h = int(w * scale) // mult * mult, int(h * scale) // mult * mult
     return img.resize((w, h), Image.LANCZOS)
 
 
@@ -234,6 +244,27 @@ def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, p
     return Image.fromarray(mask, "L")
 
 
+def load_flux(model: str, prompts: list[str], device: str):
+    """FLUX.2 klein with the prompts pre-encoded. The transformer (7.7 GB) and the Qwen3 text
+    encoder (8 GB) cannot share a 12 GB card, and swapping them per call costs ~2 min/image,
+    so: text encoder on the GPU once for every prompt -> embeddings on CPU -> text encoder
+    dropped -> transformer + VAE resident for the whole run."""
+    from diffusers import Flux2KleinInpaintPipeline
+
+    pipe = Flux2KleinInpaintPipeline.from_pretrained(model, torch_dtype=torch.bfloat16)
+    pipe.set_progress_bar_config(leave=False)
+    embeds = {}
+    pipe.text_encoder.to(device)
+    with torch.no_grad():
+        for text in dict.fromkeys(prompts):
+            embeds[text] = pipe.encode_prompt(text, device=device)[0].cpu()
+    pipe.text_encoder = None
+    torch.cuda.empty_cache()
+    pipe.transformer.to(device)
+    pipe.vae.to(device)
+    return pipe, embeds
+
+
 def load_pipe(model: str, sdxl: bool, control: bool, device: str):
     from diffusers import (AutoPipelineForInpainting, ControlNetModel, DPMSolverMultistepScheduler,
                            StableDiffusionControlNetInpaintPipeline)
@@ -267,24 +298,27 @@ def main() -> None:
     ap.add_argument("--parts", choices=PARTS, default="full", help="which clothes the single prompt replaces")
     ap.add_argument("--num", type=int, default=2, help="how many variations to generate")
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--steps", type=int, default=30)
-    ap.add_argument("--guidance", type=float, default=7.0)
+    ap.add_argument("--engine", choices=DEFAULTS, default=None,
+                    help="flux (FLUX.2 klein 4B) or sd15; default: flux if checkpoints/flux2-klein-4b exists")
+    ap.add_argument("--ref", type=Path, default=None, help="flux only: photo of a garment to put on the person")
+    ap.add_argument("--steps", type=int, default=None, help="flux 4 / sd15 30")
+    ap.add_argument("--guidance", type=float, default=None, help="flux 1.0 (ignored, distilled) / sd15 7.0")
     ap.add_argument("--grow", type=int, default=20, help="dilate the clothes mask by N px so the new garment "
                     "can take its own shape and seams blend")
     ap.add_argument("--no-neckline", action="store_true", help="don't repaint neck/shoulders for upper changes "
                     "(keeps the old neckline exactly)")
     ap.add_argument("--cover-arms", action="store_true", help="also repaint bare arms (needed for sleeves/jackets)")
     ap.add_argument("--cover-legs", action="store_true", help="also repaint bare legs (needed for pants over shorts/skirt)")
-    ap.add_argument("--res", type=int, default=768, help="working resolution of the first pass (longest side)")
-    ap.add_argument("--hires", type=int, default=1024, help="resolution of the refine pass; 0 disables it")
+    ap.add_argument("--res", type=int, default=None, help="working resolution, longest side (flux 1024 / sd15 768)")
+    ap.add_argument("--hires", type=int, default=None, help="sd15: resolution of the refine pass, 0 disables (1024)")
     ap.add_argument("--refine-strength", type=float, default=0.35, help="how much the refine pass may change (0-1)")
-    ap.add_argument("--no-control", action="store_true", help="skip the depth/edge ControlNets (faster, less faithful body)")
+    ap.add_argument("--no-control", action="store_true", help="sd15: skip the depth/edge ControlNets (faster)")
     ap.add_argument("--depth-scale", type=float, default=0.7, help="ControlNet weight for the depth map")
     ap.add_argument("--edge-scale", type=float, default=0.6, help="ControlNet weight for the skin/jewelry edge map")
     ap.add_argument("--negative", default=NEGATIVE)
-    ap.add_argument("--sdxl", action="store_true", help="use SDXL inpainting (slower, higher quality, 1024px)")
+    ap.add_argument("--sdxl", action="store_true", help="sd15 engine: use SDXL inpainting instead")
     ap.add_argument("--model", default=None, help="path or HF id of an inpainting checkpoint (overrides the default)")
-    ap.add_argument("--lora", type=Path, default=None, help="identity LoRA dir from scripts/train_identity_lora.py")
+    ap.add_argument("--lora", type=Path, default=None, help="sd15: identity LoRA dir from scripts/train_identity_lora.py")
     ap.add_argument("--lora-scale", type=float, default=0.8)
     ap.add_argument("--out", type=Path, default=Path("outputs/clothes"))
     ap.add_argument("--mask-only", action="store_true", help="only write the mask, don't run diffusion")
@@ -300,20 +334,32 @@ def main() -> None:
     else:
         ap.error("need a prompt or --upper/--lower")
 
+    engine = args.engine or ("flux" if FLUX_DIR.is_dir() else "sd15")
+    if args.sdxl or args.lora:
+        engine = "sd15"  # SDXL and the SD1.5 LoRA only exist on that path
+    for k, v in DEFAULTS[engine].items():
+        if getattr(args, k) is None:
+            setattr(args, k, v)
+    flux = engine == "flux"
+    if args.ref and not flux:
+        ap.error("--ref needs the flux engine")
+    ref = Image.open(args.ref).convert("RGB") if args.ref else None
+    mult = 16 if flux else 8  # FLUX.2 latents are 16-px aligned
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
     stem = args.image.stem
 
     src = Image.open(args.image).convert("RGB")
-    img = fit_image(src, 1024 if args.sdxl else args.res)
-    print(f"image {img.size[0]}x{img.size[1]}  device={device}")
+    img = fit_image(src, 1024 if args.sdxl else args.res, mult)
+    print(f"engine={engine}  image {img.size[0]}x{img.size[1]}  device={device}")
 
     t0 = time.time()
     labels = segment(img, device)
     found = sorted({LABELS[i] for i in np.unique(labels) if i in PARTS["full"]})
     print(f"segmented in {time.time() - t0:.1f}s, clothes found: {found or 'none'}")
 
-    control = not args.no_control and not args.sdxl
+    control = not flux and not args.no_control and not args.sdxl
     # hands: keep only what the segmenter also calls skin, so fabric between the fingers is repainted
     hands = hand_mask(img, args.grow // 2) & ~np.isin(labels, list(PARTS["full"]))
     if hands.any():
@@ -361,17 +407,27 @@ def main() -> None:
         save(guides[img.size][0], args.out / f"{stem}_depth.png")
         save(guides[img.size][1], args.out / f"{stem}_edges.png")
 
-    pipe = load_pipe(args.model or (SDXL_INPAINT if args.sdxl else SD15_INPAINT), args.sdxl, control, device)
     subject = "a person"
     if args.lora:
-        pipe.load_lora_weights(str(args.lora))
-        pipe.fuse_lora(lora_scale=args.lora_scale)
         token_file = args.lora / "token.txt"
         subject = token_file.read_text().strip() if token_file.exists() else subject
 
     def prompt_for(text: str) -> str:
+        if flux:  # FLUX reads plain sentences; keyword salad hurts it
+            what = f"the garment shown in the reference image: {text}" if ref else text
+            return (f"The same person, now wearing {what}. The clothing fits the body naturally "
+                    f"with realistic fabric, seams and lighting matching the photo. Everything else is unchanged.")
         return (f"{subject} wearing {text}, full body photo, detailed fabric texture, "
                 f"natural lighting, photorealistic, sharp focus, high detail")
+
+    embeds = {}
+    if flux:
+        pipe, embeds = load_flux(args.model or FLUX_INPAINT, [prompt_for(t) for _, t in passes], device)
+    else:
+        pipe = load_pipe(args.model or (SDXL_INPAINT if args.sdxl else SD15_INPAINT), args.sdxl, control, device)
+    if args.lora:
+        pipe.load_lora_weights(str(args.lora))
+        pipe.fuse_lora(lora_scale=args.lora_scale)
 
     base_seed = args.seed if args.seed is not None else int(torch.seed() % 2**31)
 
@@ -381,7 +437,7 @@ def main() -> None:
         return ImageChops.lighter(m.filter(ImageFilter.GaussianBlur(side / 64)), m)
 
     # refine pass runs at a higher resolution on an upscaled copy of the first pass
-    hires = args.hires if (args.hires and not args.sdxl and args.hires > max(img.size)) else 0
+    hires = args.hires if (args.hires and not args.sdxl and not flux and args.hires > max(img.size)) else 0
     if hires:
         img_hi = fit_image(src, hires)
         union_hi = union.resize(img_hi.size, Image.BILINEAR)
@@ -397,17 +453,24 @@ def main() -> None:
         x0, y0, x1, y1 = pipe.mask_processor.get_crop_region(mask_img, *image.size, pad=side // 24)
         cw, ch = x1 - x0, y1 - y0
         scale = side / max(cw, ch)
-        rw, rh = int(cw * scale) // 8 * 8, int(ch * scale) // 8 * 8
+        rw, rh = int(cw * scale) // mult * mult, int(ch * scale) // mult * mult
         box = (x0, y0, x1, y1)
         crop = image.crop(box).resize((rw, rh), Image.LANCZOS)
         mcrop = mask_img.crop(box).resize((rw, rh), Image.BILINEAR)
         soft_in = pipe.mask_processor.blur(mcrop, blur_factor=side // 64)
         extra = {}
+        if flux:
+            extra["prompt_embeds"] = embeds[prompt_for(text)].to(device)
+            if ref is not None:
+                extra["image_reference"] = ref
+        else:
+            extra["prompt"] = prompt_for(text)
+            extra["negative_prompt"] = args.negative  # the distilled FLUX has no CFG, so no negative
         if control:
-            extra = dict(control_image=[g.crop(box).resize((rw, rh), Image.BILINEAR) for g in guides[image.size]],
+            extra.update(control_image=[g.crop(box).resize((rw, rh), Image.BILINEAR) for g in guides[image.size]],
                          controlnet_conditioning_scale=[args.depth_scale, args.edge_scale])
         out = pipe(
-            prompt=prompt_for(text), negative_prompt=args.negative, image=crop, mask_image=soft_in, **extra,
+            image=crop, mask_image=soft_in, **extra,
             width=rw, height=rh, num_inference_steps=args.steps, guidance_scale=args.guidance,
             generator=torch.Generator(device="cpu").manual_seed(seed), strength=strength,
         ).images[0]
