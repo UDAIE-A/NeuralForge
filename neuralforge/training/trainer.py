@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from ..core.model import NeuralForge
 from ..core.config import ModelConfig
+from .checkpoint_io import atomic_save, remove_quietly
 
 
 class CosineScheduleWithWarmup:
@@ -141,13 +142,16 @@ class Trainer:
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 1e-4,
         max_steps: Optional[int] = None,
+        keep_best: bool = False,
     ):
         self.model = model
         # Named-model checkpointing. While training we keep a single rolling
-        # "<name>_train.pt" (full state, resumable) plus "<name>_best.pt"; on
-        # completion we publish a clean weights-only "<name>.pt" with the
-        # tokenizer embedded, and delete the training file. No epoch_N spam.
+        # "<name>_train.pt" (full state, resumable) plus a weights-only
+        # "<name>_best.pt"; on completion we publish a clean "<name>.pt" with
+        # the tokenizer embedded and delete both, so a finished run leaves ONE
+        # file. keep_best=True keeps "<name>_best.pt" as well.
         self.model_name = model_name
+        self.keep_best = keep_best
         self.tokenizer = tokenizer
         # Optional hooks for external monitoring/control (e.g. the web UI).
         # metrics_callback(dict) is called each batch; should_stop() -> bool is
@@ -617,11 +621,21 @@ class Trainer:
 
     def save_training(self):
         """Overwrite the single rolling training checkpoint (resumable)."""
-        torch.save(self._full_checkpoint(), self.training_path)
+        atomic_save(self._full_checkpoint(), self.training_path)
 
     def save_best(self):
-        """Overwrite the best-by-validation checkpoint."""
-        torch.save(self._full_checkpoint(), self.best_path)
+        """Overwrite the best-by-validation weights.
+
+        Weights only: resuming always goes through "<name>_train.pt", so
+        optimizer state here just tripled the file (743 MB -> 2.2 GB for the
+        186M model) for something publish() never reads.
+        """
+        atomic_save({
+            'model_state_dict': self._unwrapped_model().state_dict(),
+            'global_step': self.global_step,
+            'best_val_loss': self.best_val_loss,
+            'config': self.config,
+        }, self.best_path)
 
     def publish(self):
         """Write the clean, self-contained final model and drop training state.
@@ -637,8 +651,12 @@ class Trainer:
         most-overfit checkpoint, and deleting "<name>_best.pt" immediately
         afterwards destroyed the only good copy.
 
-        "<name>_best.pt" is therefore kept on disk as well; only the bulky
-        resumable "<name>_train.pt" is removed.
+        Because the published file now carries those best weights (and
+        meta records where they came from), "<name>_best.pt" is a byte-for-byte
+        duplicate once the publish has landed, and is removed along with the
+        resumable "<name>_train.pt" - a finished run leaves one file, not
+        three. The write is atomic, so nothing is deleted unless the published
+        file is complete. Pass keep_best=True to keep "<name>_best.pt".
         """
         source = 'final epoch'
         state_dict = self._unwrapped_model().state_dict()
@@ -665,14 +683,10 @@ class Trainer:
                 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
             },
         }
-        torch.save(artifact, self.published_path)
-        # Only the resumable training state is disposable; the best checkpoint
-        # stays so a published model can always be traced back to it.
-        if os.path.exists(self.training_path):
-            try:
-                os.remove(self.training_path)
-            except OSError:
-                pass
+        atomic_save(artifact, self.published_path)
+        remove_quietly(self.training_path)
+        if not self.keep_best:
+            remove_quietly(self.best_path)
         print(f"  Published model -> {_display_path(self.published_path)} "
               f"[weights: {source}]")
 

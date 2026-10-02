@@ -4,7 +4,7 @@ Teach the model basic conversational reflexes (the "foundation"): when a human
 says hi / hello / hey (and a few other everyday things), reply the way a person
 would. This is the easy on-ramp before world-knowledge training.
 
-    python scripts/teach_basics.py --checkpoint checkpoints/small.pt
+    python scripts/teach_basics.py --checkpoint checkpoints/medium186_v1.pt
 Saves the result to checkpoints/learned.pt so it persists for the web UI.
 """
 
@@ -64,7 +64,7 @@ BASICS = [
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="checkpoints/small.pt")
+    p.add_argument("--checkpoint", default="checkpoints/medium186_v1.pt")
     p.add_argument("--device", default=None)
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--steps", type=int, default=12)

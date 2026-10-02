@@ -17,7 +17,7 @@ NeuralForge is a GPT-style decoder-only transformer language model implemented e
 - **Rich sampling**: temperature, top-k, top-p (nucleus), and repetition penalty
 - **Visual dashboard**: Real-time training metrics, GPU stats, loss trends
 - **Auto validation split**: Holds out a slice of the data when none is given
-- **Named model artifacts**: train to `<name>_train.pt`, keep `<name>_best.pt`, publish `<name>.pt` from the best-validation weights
+- **Named model artifacts**: train to `<name>_train.pt` + `<name>_best.pt`, publish `<name>.pt` from the best-validation weights, and leave only that one file behind
 - **Overfitting controls**: non-overlapping windows by default, `--dropout`, and `--early-stopping` on validation loss
 - **Config-driven runs**: `train.py --config configs/<name>.json` instead of a script per model size
 - **GPU-only**: CUDA required for training

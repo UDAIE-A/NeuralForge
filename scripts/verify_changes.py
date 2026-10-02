@@ -303,23 +303,30 @@ def check_training(tmp):
     small = os.path.join(tmp, "small.txt")
     open(small, "w", encoding="utf-8").write(_corpus_text()[:60000])
 
-    # --- publish() must ship the best-validation weights, keep _best.pt ---
-    d1 = os.path.join(tmp, "ck1")
-    r = run(["train.py", "--preset", "tiny", "--data", corpus, "--name", "vfy",
-             "--vocab-size", "1200", "--seq-len", "128", "--batch-size", "16",
-             "--epochs", "3", "--lr", "1e-3", "--checkpoint-dir", d1,
-             "--no-compile", "--seed", "1"])
+    # --- publish() ships the best-validation weights, leaves one file ---
+    train_args = ["train.py", "--preset", "tiny", "--data", corpus, "--name", "vfy",
+                  "--vocab-size", "1200", "--seq-len", "128", "--batch-size", "16",
+                  "--epochs", "3", "--lr", "1e-3", "--no-compile", "--seed", "1"]
+    d0 = os.path.join(tmp, "ck0")
+    r = run(train_args + ["--checkpoint-dir", d0])
     if r.returncode != 0:
         check(2, "training run completes", False, (r.stdout + r.stderr)[-600:])
         return
     check(2, "training run completes", True)
+    left = sorted(f for f in os.listdir(d0) if f.endswith(".pt") or f.endswith(".tmp"))
+    check(2, "a finished run leaves only <name>.pt", left == ["vfy.pt"], f"left: {left}")
 
+    # --keep-best keeps the best file, so publish can be checked against it.
+    d1 = os.path.join(tmp, "ck1")
+    r = run(train_args + ["--checkpoint-dir", d1, "--keep-best"])
     pub, best = os.path.join(d1, "vfy.pt"), os.path.join(d1, "vfy_best.pt")
-    check(2, "_best.pt is kept (not deleted by publish)", os.path.exists(best))
+    check(2, "--keep-best keeps _best.pt", r.returncode == 0 and os.path.exists(best))
     check(2, "_train.pt removed", not os.path.exists(os.path.join(d1, "vfy_train.pt")))
     if os.path.exists(pub) and os.path.exists(best):
         p = torch.load(pub, map_location="cpu", weights_only=False)
         b = torch.load(best, map_location="cpu", weights_only=False)
+        check(2, "_best.pt is weights-only (no optimizer state)",
+              "optimizer_state_dict" not in b)
         same = all(torch.equal(p["model_state_dict"][k], b["model_state_dict"][k])
                    for k in p["model_state_dict"])
         check(2, "published weights == best-validation weights", same)

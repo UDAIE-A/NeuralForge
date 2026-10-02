@@ -5,10 +5,10 @@ NeuralForge Learn -- a live, human-in-the-loop learning system.
 Chat with the model, then teach it from your reactions:
 
     # Interactive chat + live teaching (GPU, small model)
-    python learn.py --checkpoint checkpoints/small.pt --interactive
+    python learn.py --checkpoint checkpoints/medium186_v1.pt --interactive
 
     # Scripted "basic human interactions" self-test (proves learning works)
-    python learn.py --checkpoint checkpoints/small.pt --test
+    python learn.py --checkpoint checkpoints/medium186_v1.pt --test
 
 After each model reply you can:
     y            approve the reply (reinforce it)
@@ -198,8 +198,8 @@ def _maybe_persist(learner, args):
 
 def main():
     p = argparse.ArgumentParser(description="NeuralForge live learning system")
-    p.add_argument("--checkpoint", default="checkpoints/small.pt",
-                   help="Path to a .pt checkpoint (default: checkpoints/small.pt)")
+    p.add_argument("--checkpoint", default="checkpoints/medium186_v1.pt",
+                   help="Path to a .pt checkpoint (default: checkpoints/medium186_v1.pt)")
     p.add_argument("--interactive", action="store_true", help="Run the interactive teaching chat")
     p.add_argument("--test", action="store_true", help="Run the scripted basic-interaction self-test")
     p.add_argument("--device", default=None, help="Force device (cuda/cpu)")

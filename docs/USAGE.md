@@ -70,7 +70,8 @@ python train.py --data <file> [options]
 | `--checkpoint-dir` | path | `checkpoints` | Where checkpoints and the tokenizer are saved. |
 | `--resume` | path | `None` | Resume training from a checkpoint `.pt`. |
 | `--char` | flag | off | Use the instant character-level tokenizer instead of BPE. |
-| `--name` | str | `<preset>` | Base model name. Produces `<name>.pt`, `<name>_train.pt`, and `<name>_best.pt`. |
+| `--name` | str | `<preset>` | Base model name. While training: `<name>_train.pt` and `<name>_best.pt`; a finished run leaves only `<name>.pt`. |
+| `--keep-best` | flag | off | Keep `<name>_best.pt` after publishing (it duplicates the weights in `<name>.pt`). |
 | `--grad-accum` | int | `1` | Gradient accumulation steps — simulates a larger batch without more VRAM. |
 | `--num-workers` | int | platform | DataLoader workers (`0` on Windows, `8` elsewhere). |
 | `--warmup-steps` | int | adaptive | LR warmup steps (default: capped at ~10% of the run). |
@@ -231,15 +232,20 @@ VRAM tips:
 ## Checkpoints
 
 - Saved to `--checkpoint-dir` (default `checkpoints/`): one rolling
-  `<name>_train.pt` while training, `<name>_best.pt` for the best validation
-  snapshot, and `<name>.pt` as the published final model.
+  `<name>_train.pt` while training (weights + optimizer, resumable),
+  `<name>_best.pt` for the best validation weights (weights only), and
+  `<name>.pt` as the published final model.
 - The tokenizer is saved alongside as `tokenizer.pkl`. Published `<name>.pt`
   models also embed the tokenizer, so generation can usually load them without
   a separate `--tokenizer` argument.
 - On successful completion, `<name>.pt` is published from the **best-validation**
   weights (not the last epoch's) whenever a validation split exists; its
-  `meta['weights_from']` records which. Only the bulky resumable
-  `<name>_train.pt` is deleted — `<name>_best.pt` is kept.
+  `meta['weights_from']` records which. Both `<name>_train.pt` and
+  `<name>_best.pt` are then deleted, so **a finished run leaves one file**
+  (`--keep-best` keeps the best file too). If a run is stopped or crashes,
+  both stay so it can be resumed.
+- All checkpoint writes are atomic (temp file + rename): an interrupted save
+  never leaves a truncated, unloadable `.pt` behind.
 - **Architecture note:** the model now uses RoPE + SwiGLU + RMSNorm.
   Checkpoints from before that change won't load on `main`; check out the
   `v0-legacy-arch` tag to use them, then `git checkout main` to return.
@@ -257,7 +263,7 @@ python generate.py --checkpoint checkpoints/tiny.pt --prompt "Alice " --top-p 0.
 **B. "A decent model overnight on my 3060"**
 ```bash
 python train.py --preset small --data data/train_large.txt --vocab-size 8000 --epochs 20 --seq-len 384 --batch-size 12
-python generate.py --checkpoint checkpoints/small_best.pt --prompt "The " --max-tokens 300 --top-p 0.9 --repetition-penalty 1.2
+python generate.py --checkpoint checkpoints/small.pt --prompt "The " --max-tokens 300 --top-p 0.9 --repetition-penalty 1.2
 ```
 
 **C. "Train on my own text"**

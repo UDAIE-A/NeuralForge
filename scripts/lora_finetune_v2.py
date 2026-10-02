@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from neuralforge.core import NeuralForge, ModelConfig
 from neuralforge.tokenizer import BPETokenizer
 from neuralforge.training.data import read_text_input
-from neuralforge.training import create_dataloaders
+from neuralforge.training import create_dataloaders, atomic_save, remove_quietly
 from neuralforge.chat import decode_reply
 from neuralforge.learning.lora import (
     LoRALinear, inject_lora, count_lora_params, DEFAULT_TARGETS,
@@ -147,7 +147,9 @@ def main():
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-split", type=float, default=0.05)
-    parser.add_argument("--save-every", type=int, default=250)
+    parser.add_argument("--save-every", type=int, default=250,
+                        help="refresh ONE rolling <output>_last.pt every N steps "
+                             "(crash insurance; deleted when the run finishes). 0 = off")
     parser.add_argument("--eval-every", type=int, default=250)
     args = parser.parse_args()
 
@@ -220,6 +222,23 @@ def main():
     print(f"Effective batch size: {args.batch_size * args.grad_accum}")
     print("=" * 60)
 
+    def adapter_artifact(at_step, loss):
+        return {
+            'adapter_state': {n: p.detach().cpu().clone()
+                              for n, p in model.named_parameters() if 'lora' in n},
+            'config': {'rank': args.rank, 'alpha': args.alpha, 'target_modules': target_modules},
+            'step': at_step,
+            'val_loss': loss,
+        }
+
+    # One file per run. Every evaluation is recorded here and written into the
+    # final adapter, instead of keeping a 38 MB snapshot per eval just to
+    # remember how the curve went - that is how checkpoints/ grew 90 step
+    # files. Only the best adapter and its history survive the run.
+    history = []
+    best_artifact = None
+    last_path = os.path.splitext(args.output)[0] + '_last.pt'
+
     step = 0
     best_val_loss = float('inf')
     train_iter = iter(train_loader)
@@ -289,18 +308,22 @@ def main():
                     if val_batches >= 50:
                         break
             
-            val_loss /= max(val_batches, 1)
-            print(f"  >> Val Loss (assistant-only): {val_loss:.4f}")
-            
-            if val_loss < best_val_loss:
+            if val_batches == 0:
+                # No validation window contained an assistant turn. Reporting
+                # 0.0 here used to beat every real loss and get saved as the
+                # "best" adapter.
+                val_loss = None
+                print("  >> Val Loss: n/a (no assistant tokens in the validation windows)")
+            else:
+                val_loss /= val_batches
+                print(f"  >> Val Loss (assistant-only): {val_loss:.4f}")
+                history.append({'step': step, 'val_loss': val_loss})
+
+            if val_loss is not None and val_loss < best_val_loss:
                 best_val_loss = val_loss
-                adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if 'lora' in n}
-                torch.save({
-                    'adapter_state': adapter_state,
-                    'config': {'rank': args.rank, 'alpha': args.alpha, 'target_modules': target_modules},
-                    'step': step,
-                    'val_loss': val_loss,
-                }, args.output)
+                best_artifact = adapter_artifact(step, val_loss)
+                best_artifact['history'] = list(history)
+                atomic_save(best_artifact, args.output)
                 print(f"  >> Saved best adapter to {args.output}")
             
             # Generation evaluation
@@ -315,23 +338,26 @@ def main():
             
             model.train()
 
-        # Periodic checkpoint
-        if step % args.save_every == 0 and step > 0:
-            ckpt_path = args.output.replace('.pt', f'_step{step}.pt')
-            adapter_state = {n: p.detach().cpu() for n, p in model.named_parameters() if 'lora' in n}
-            torch.save({
-                'adapter_state': adapter_state,
-                'config': {'rank': args.rank, 'alpha': args.alpha, 'target_modules': target_modules},
-                'step': step,
-                'val_loss': val_loss if 'val_loss' in locals() else None,
-            }, ckpt_path)
-            print(f"  >> Checkpoint saved: {ckpt_path}")
+        # Rolling crash insurance: one file, overwritten in place.
+        if args.save_every and step % args.save_every == 0 and step > 0:
+            atomic_save(adapter_artifact(step, None), last_path)
 
         step += 1
 
+    if best_artifact is None:
+        # No evaluation ever produced a usable loss (run shorter than
+        # --eval-every, or no assistant turns in validation): keep the final
+        # weights rather than leaving nothing behind.
+        best_artifact = adapter_artifact(step, None)
+        print("  >> No validation result - saving final adapter instead")
+    best_artifact['history'] = history
+    atomic_save(best_artifact, args.output)
+    remove_quietly(last_path)
+
     total_time = time.time() - start_time
     print("=" * 60)
-    print(f"Done in {total_time/60:.1f} min | Best val loss: {best_val_loss:.4f}")
+    best = f"{best_val_loss:.4f}" if history else "n/a"
+    print(f"Done in {total_time/60:.1f} min | Best val loss: {best} | {len(history)} evals recorded in the adapter")
     print(f"Final adapter: {args.output}")
 
 

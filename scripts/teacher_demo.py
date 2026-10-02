@@ -4,7 +4,7 @@ Teacher demo: you are the teacher (world knowledge), the model is a curious
 3-year-old who knows nothing. Ask questions, show its naive answer, then teach
 it the correct adult answer via live online fine-tuning, and re-check.
 
-    python scripts/teacher_demo.py --checkpoint checkpoints/small.pt
+    python scripts/teacher_demo.py --checkpoint checkpoints/medium186_v1.pt
 """
 
 import os
@@ -63,7 +63,7 @@ CURRICULUM = [
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="checkpoints/small.pt")
+    p.add_argument("--checkpoint", default="checkpoints/medium186_v1.pt")
     p.add_argument("--device", default=None)
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--steps", type=int, default=10)

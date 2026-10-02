@@ -113,7 +113,8 @@ def main():
                        help='Disable torch.compile (auto-skipped if Triton is missing)')
     parser.add_argument('--name', type=str, default=None,
                        help='Model name for checkpoint files (default: preset name). '
-                            'Produces <name>.pt (final), <name>_train.pt, <name>_best.pt')
+                            'While training: <name>_train.pt (resumable) and '
+                            '<name>_best.pt; a finished run leaves only <name>.pt')
     parser.add_argument('--seed', type=int, default=None,
                        help='Random seed for reproducible runs (torch, cuda, python, numpy)')
     parser.add_argument('--grad-accum', type=int, default=1,
@@ -141,6 +142,9 @@ def main():
     parser.add_argument('--max-steps', type=int, default=None,
                        help='Hard cap on optimizer steps, regardless of --epochs. '
                             'Lets a run be sized in tokens rather than passes')
+    parser.add_argument('--keep-best', action='store_true',
+                       help='Keep <name>_best.pt after publishing. Off by default: '
+                            '<name>.pt already holds the same best-validation weights')
 
     arch = parser.add_argument_group(
         'architecture overrides',
@@ -282,6 +286,7 @@ def main():
         warmup_steps=args.warmup_steps,
         early_stopping_patience=args.early_stopping,
         max_steps=args.max_steps,
+        keep_best=args.keep_best,
     )
     
     if args.resume:
