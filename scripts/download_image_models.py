@@ -16,6 +16,7 @@ Fetches (~8.5 GB total):
   checkpoints/face_landmarker.task MediaPipe 478-point face mesh (analyze_person.py)
   checkpoints/pose_landmarker_heavy.task MediaPipe 33-point body pose + silhouette (analyze_person.py)
   checkpoints/sam2.1-large         SAM 2.1, Apache-2.0, ~860 MB: full-res mask edges (refine_masks.py)
+  checkpoints/sapiens-seg-1b       (--sapiens) Sapiens-1B body parts, ~4.7 GB, CC-BY-NC-4.0 NON-COMMERCIAL
   checkpoints/flux2-klein-4b       (--flux) FLUX.2 klein 4B inpainting, Apache-2.0, ~16 GB
 """
 
@@ -29,6 +30,8 @@ from huggingface_hub import snapshot_download
 CKPT = Path(__file__).resolve().parent.parent / "checkpoints"
 ap = argparse.ArgumentParser()
 ap.add_argument("--flux", action="store_true", help="also fetch FLUX.2 klein 4B (~16 GB)")
+ap.add_argument("--sapiens", action="store_true",
+                help="also fetch Sapiens-1B (analyze_person.py --parser sapiens). NON-COMMERCIAL license")
 ap.add_argument("--flux-dir", type=Path, default=None, help="store FLUX here (another drive) and junction it into checkpoints/")
 args = ap.parse_args()
 
@@ -57,6 +60,10 @@ for name, url in [
 ]:
     if not (CKPT / name).exists():
         urllib.request.urlretrieve(url, CKPT / name)
+if args.sapiens:
+    print("Sapiens is CC-BY-NC-4.0: non-commercial use only.")
+    snapshot_download("facebook/sapiens-seg-1b-torchscript", local_dir=CKPT / "sapiens-seg-1b",
+                      allow_patterns=["*.pt2", "README.md"])
 if args.flux:
     target = args.flux_dir or CKPT / "flux2-klein-4b"
     snapshot_download("black-forest-labs/FLUX.2-klein-4B", local_dir=target,

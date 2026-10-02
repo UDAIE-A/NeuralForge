@@ -35,6 +35,22 @@ ROOT = Path(__file__).resolve().parent.parent
 CKPT = ROOT / "checkpoints"
 SAM_MODEL = CKPT / "sam2.1-large"
 SKIN = 18  # extra label: exposed neck/chest skin (SegFormer folds it into 'face')
+APPAREL = 19  # extra label: Sapiens' 'Apparel' (accessories / other clothing)
+NUM_LABELS = 20
+SAPIENS_MODEL = CKPT / "sapiens-seg-1b" / "sapiens_1b_goliath_best_goliath_mIoU_7994_epoch_151_torchscript.pt2"
+
+# Sapiens (Goliath, 28 classes) -> this project's label ids (SegFormer's, plus SKIN/APPAREL).
+# Upper/lower arm and the hand fold into one arm label so downstream logic is unchanged;
+# the hands are also returned separately. Lips/teeth/tongue are face.
+SAPIENS_CLASSES = [
+    "Background", "Apparel", "Face_Neck", "Hair", "Left_Foot", "Left_Hand", "Left_Lower_Arm",
+    "Left_Lower_Leg", "Left_Shoe", "Left_Sock", "Left_Upper_Arm", "Left_Upper_Leg", "Lower_Clothing",
+    "Right_Foot", "Right_Hand", "Right_Lower_Arm", "Right_Lower_Leg", "Right_Shoe", "Right_Sock",
+    "Right_Upper_Arm", "Right_Upper_Leg", "Torso", "Upper_Clothing", "Lower_Lip", "Upper_Lip",
+    "Lower_Teeth", "Upper_Teeth", "Tongue"]
+SAPIENS_TO_LABEL = [0, APPAREL, 11, 2, 12, 14, 14, 12, 9, 12, 14, 12, 6, 13, 15, 15, 13, 10, 13,
+                    15, 13, SKIN, 4, 11, 11, 11, 11, 11]
+SAPIENS_HANDS = (5, 14)
 
 HAND_TIPS = [4, 8, 12, 16, 20]
 HAND_KNUCKLES = [2, 5, 9, 13, 17]
@@ -71,6 +87,45 @@ def segformer_probs(img: Image.Image, seg_model: str, device: str, side: int = 5
     probs = torch.nn.functional.interpolate(logits, size=(h, w), mode="bilinear",
                                             align_corners=False).softmax(1)[0]
     return probs.half().cpu().numpy()  # (C, H, W) - float16 halves a ~470 MB array
+
+
+# ----------------------------------------------------------------------------- Sapiens
+def sapiens_probs(img: Image.Image, device: str) -> tuple[np.ndarray, np.ndarray]:
+    """Sapiens-1B body-part probabilities mapped to this project's labels, at full resolution.
+
+    Returns (probs (NUM_LABELS, H, W) float16, hand probability (H, W) float16).
+    LICENSE: Sapiens is CC-BY-NC-4.0 - non-commercial use only.
+    The photo is letterboxed into Sapiens' 768x1024 input (no aspect distortion); the model
+    is freed from the GPU before returning so SAM never shares memory with it.
+    """
+    w, h = img.size
+    s = min(768 / w, 1024 / h)
+    nw, nh = round(w * s), round(h * s)
+    ox, oy = (768 - nw) // 2, (1024 - nh) // 2
+    canvas = Image.new("RGB", (768, 1024))
+    canvas.paste(img.resize((nw, nh), Image.BICUBIC), (ox, oy))
+    x = torch.from_numpy(np.array(canvas)).permute(2, 0, 1).float()
+    mean = torch.tensor([123.675, 116.28, 103.53])[:, None, None]
+    std = torch.tensor([58.395, 57.12, 57.375])[:, None, None]
+    x = ((x - mean) / std)[None].to(device)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)   # torch.jit.load deprecation notice
+        model = torch.jit.load(str(SAPIENS_MODEL), map_location=device).eval()
+    with torch.no_grad():
+        logits = model(x).float()                          # (1, 28, 512, 384)
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    logits = torch.nn.functional.interpolate(logits, size=(1024, 768), mode="bilinear",
+                                             align_corners=False)[..., oy:oy + nh, ox:ox + nw]
+    p28 = torch.nn.functional.interpolate(logits, size=(h, w), mode="bilinear",
+                                          align_corners=False).softmax(1)[0].cpu()
+    probs = torch.zeros((NUM_LABELS, h, w), dtype=torch.float32)
+    probs.index_add_(0, torch.tensor(SAPIENS_TO_LABEL), p28)
+    hands = p28[list(SAPIENS_HANDS)].sum(0)
+    return probs.half().numpy(), hands.half().numpy()
 
 
 # ----------------------------------------------------------------------------- prompts
@@ -167,7 +222,7 @@ def edge_alignment(labels: np.ndarray, gray: np.ndarray, tol: int = 2) -> float:
     return float((near & b).sum() / b.sum())
 
 
-GARMENT_IDS = {1, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17}
+GARMENT_IDS = {1, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, APPAREL}
 
 
 def _crop_around(piece: np.ndarray, margin: int = 3):
@@ -222,6 +277,37 @@ def fill_enclosed(labels: np.ndarray, photo: Image.Image, reach: int) -> tuple[n
             sub = out[win]
             sub[piece] = ring_majority(labels[win], piece, GARMENT_IDS)
             filled += 1
+
+    # Fully enclosed holes the global colour test let through: soft, desaturated skin can sit
+    # close to a grey-blue backdrop. Such a hole belongs to the person when its colour is
+    # nearer the person around it than the backdrop nearest to it; a real gap (sea showing
+    # between hand and chest) is nearer the backdrop and stays.
+    still = out > 0
+    holes = binary_fill_holes(still) & ~still
+    n, comp, stats, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8))
+    outside = ~binary_fill_holes(still)
+    for c in range(1, n):
+        x, y, w, h = stats[c, :4]
+        win = (slice(max(0, y - 3), min(H, y + h + 3)), slice(max(0, x - 3), min(W, x + w + 3)))
+        piece = comp[win] == c
+        ring = cv2.dilate(piece.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~piece
+        if not ring.any():
+            continue
+        colour = lab[win][piece].mean(0)
+        person_c = lab[win][ring].mean(0)
+        # nearest backdrop: search a widening window around the hole, else the global median
+        backdrop_c = bg
+        for grow_px in (100, 300, 900):
+            far = (slice(max(0, y - grow_px), min(H, y + h + grow_px)),
+                   slice(max(0, x - grow_px), min(W, x + w + grow_px)))
+            if outside[far].sum() >= 200:
+                backdrop_c = lab[far][outside[far]].mean(0)
+                break
+        if np.linalg.norm(colour - person_c) < np.linalg.norm(colour - backdrop_c):
+            # plain majority: preferring garments here let one earring claim a sheet of hair
+            sub = out[win]
+            sub[piece] = ring_majority(out[win], piece)
+            filled += 1
     return out, filled
 
 
@@ -245,6 +331,7 @@ SKIN_IDS = (11, 12, 13, 14, 15, SKIN)   # face, legs, arms, neck/chest skin
 
 
 def clean_semantics(coarse: np.ndarray, face_oval: np.ndarray | None, legs_visible: bool,
+                    merge_garments: bool = True, photo: Image.Image | None = None,
                     log=print) -> np.ndarray:
     """Fix label mistakes the clothes parser makes on close-up, tilted portraits.
 
@@ -255,15 +342,30 @@ def clean_semantics(coarse: np.ndarray, face_oval: np.ndarray | None, legs_visib
     out = coarse.copy()
     H, W = out.shape
 
-    # 1. One garment, one label: touching cloth pieces take the majority label.
+    # 1. One garment, one label: touching cloth pieces take the majority label. (SegFormer
+    #    only - Sapiens tells a top from trousers reliably, and those do touch at the waist.)
     n, comp = cv2.connectedComponents(np.isin(out, CLOTH_IDS).astype(np.uint8))
-    for c in range(1, n):
+    for c in range(1, n if merge_garments else 1):
         piece = comp == c
         vals = out[piece]
         major = int(np.bincount(vals).argmax())
         if (vals != major).any():
             out[piece] = major
             log(f"  garment pieces {sorted(set(int(v) for v in np.unique(vals)))} merged as {major}")
+    # One-piece check (Sapiens): it only knows upper vs lower clothing, so a dress comes out
+    # as a top with 'trousers' patches near the hem. Touching upper and lower pieces of the
+    # same colour are one garment - a dress. A top and trousers in different colours stay apart.
+    if not merge_garments and photo is not None:
+        lab_img = cv2.cvtColor(np.asarray(photo), cv2.COLOR_RGB2LAB).astype(np.float32)
+        for c in range(1, n):
+            piece = comp == c
+            up, low = piece & (out == 4), piece & (out == 6)
+            if up.sum() < 500 or low.sum() < 500:
+                continue
+            gap = float(np.linalg.norm(lab_img[up].mean(0) - lab_img[low].mean(0)))
+            if gap < 15:
+                out[piece & np.isin(out, (4, 6))] = 7
+                log(f"  upper + lower clothing of one colour (dE {gap:.1f}) merged into a dress")
     # A stray 'garment' far smaller than the main one and surrounded by skin is a shadow or a
     # skin fold the parser misread (seen: blurred skin beside an elbow called upper_clothes).
     if n > 2:
@@ -304,7 +406,8 @@ def clean_semantics(coarse: np.ndarray, face_oval: np.ndarray | None, legs_visib
 # ----------------------------------------------------------------------------- main entry
 def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
            hand_landmarks: list[np.ndarray], device: str, labels_map: dict,
-           legs_visible: bool = True, log=print) -> dict:
+           legs_visible: bool = True, extra_hands: np.ndarray | None = None,
+           merge_garments: bool = True, log=print) -> dict:
     """Return refined full-res `labels` (uint8), `hands` mask, `person` mask and timings.
 
     probs: SegFormer class probabilities at full res (C, H, W).
@@ -332,7 +435,7 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
         coarse = coarse.copy()
         coarse[is_face & ~face_oval & (rows > chin)] = SKIN
         coarse[face_oval] = 11
-    coarse = clean_semantics(coarse, face_oval, legs_visible, log)
+    coarse = clean_semantics(coarse, face_oval, legs_visible, merge_garments, photo, log)
 
     def run_region(label: int, region: np.ndarray, k_pos: int = 3) -> np.ndarray | None:
         box = mask_box(region)
@@ -421,7 +524,18 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
     snapped = np.stack([guided_snap((labels == l).astype(np.float32), guide, radius) for l in present])
     labels = np.asarray(present, np.uint8)[snapped.argmax(0)]
     labels = remove_specks(labels, min_px=max(50, W * H // 20000))
+    if extra_hands is not None:
+        # the parser's own hand pixels count too, but only on the arms (never on clothing)
+        hands |= (extra_hands.astype(np.float32) > 0.5) & np.isin(labels, (14, 15))
     hands_m = guided_snap(hands.astype(np.float32), guide, radius) > 0.5
+    # A hand traced from its own landmarks beats whatever garment edge spilled onto it:
+    # each hand takes the arm label it is attached to.
+    n, comp = cv2.connectedComponents(hands_m.astype(np.uint8))
+    for c in range(1, n):
+        piece = comp == c
+        arm = ring_majority(labels, piece, {14, 15})
+        arm = arm if arm in (14, 15) else 14
+        labels[piece & ~np.isin(labels, (14, 15))] = arm
     log(f"  edge snapping ({time.time() - t:.1f}s), {sam.calls} SAM passes")
     return {"labels": labels, "sam_labels": sam_labels, "hands": hands_m,
             "person": labels > 0, "sam_calls": sam.calls}

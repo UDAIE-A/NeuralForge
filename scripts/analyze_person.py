@@ -2,6 +2,13 @@
 
   venv/Scripts/python.exe scripts/analyze_person.py photo.jpg
   venv/Scripts/python.exe scripts/analyze_person.py photo.jpg --device cpu --threads 4
+  venv/Scripts/python.exe scripts/analyze_person.py photo.jpg --parser sapiens   # NON-COMMERCIAL
+
+--parser picks what decides WHICH region is which (SAM 2.1 then draws every boundary):
+  segformer  (default) clothes parser trained on full-body fashion photos. Commercial use OK.
+  sapiens    Meta Sapiens-1B, 28 body parts. Much better on close-ups and tilted poses (tells
+             chest skin from an arm, finds earrings), ~5 s on the GPU, 6.3 GB VRAM peak, freed
+             before SAM loads. CC-BY-NC-4.0: NON-COMMERCIAL USE ONLY.
 
 Everything runs zero-shot on pretrained models - nothing is trained, one picture is enough:
 
@@ -27,7 +34,8 @@ is no scale reference in a single photo, so they are reported in pixels and as r
 shoulder-joint width, never in centimetres.
 
 All models are Apache-2.0 except the SegFormer clothes parser (license "other" - see
-checkpoints/segformer-clothes/README.md). Run scripts/download_image_models.py once first.
+checkpoints/segformer-clothes/README.md) and the optional Sapiens parser (CC-BY-NC-4.0).
+Run scripts/download_image_models.py once first (add --sapiens for the Sapiens parser).
 """
 
 from __future__ import annotations
@@ -46,14 +54,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from change_clothes import (  # noqa: E402  (shared label map and model helpers)
     CKPT, DEPTH_MODEL, HAND_MODEL, LABELS as SEG_LABELS, ROOT, SEG_MODEL, bbox, fit_image, hand_mask, segment,
 )
-from refine_masks import SKIN, edge_alignment, refine, segformer_probs  # noqa: E402
+from refine_masks import (  # noqa: E402
+    APPAREL, SKIN, edge_alignment, refine, sapiens_probs, segformer_probs,
+)
 
-LABELS = {**SEG_LABELS, SKIN: "neck_chest_skin"}
+LABELS = {**SEG_LABELS, SKIN: "neck_chest_skin", APPAREL: "apparel"}
 
 FACE_MODEL = CKPT / "face_landmarker.task"
 POSE_MODEL = CKPT / "pose_landmarker_heavy.task"
 
-GARMENTS = {1, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17}  # hat, sunglasses, clothes, belt, shoes, bag, scarf
+GARMENTS = {1, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, APPAREL}  # hat, sunglasses, clothes, belt, shoes, bag, scarf
 ARM_IDS = {14, 15}
 
 # MediaPipe pose landmark indices
@@ -71,7 +81,7 @@ PALETTE = np.array([
     [0, 0, 0], [255, 200, 0], [120, 70, 20], [60, 60, 60], [230, 30, 30], [30, 160, 230],
     [30, 60, 200], [200, 40, 160], [150, 150, 0], [90, 200, 90], [90, 200, 90], [255, 170, 140],
     [255, 120, 60], [255, 120, 60], [255, 220, 120], [255, 220, 120], [120, 0, 200], [0, 200, 200],
-    [255, 150, 200],
+    [255, 150, 200], [160, 160, 255],
 ], np.uint8)
 
 
@@ -321,6 +331,9 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=4, help="CPU threads for torch (keeps the machine responsive)")
     ap.add_argument("--max-side", type=int, default=1024, help="working resolution (longest side)")
     ap.add_argument("--no-depth", action="store_true", help="skip the depth map")
+    ap.add_argument("--parser", choices=["segformer", "sapiens"], default="segformer",
+                    help="what decides which region is which. sapiens (Meta, 1B) is far better on "
+                         "close-ups and tilted poses but is CC-BY-NC-4.0: NON-COMMERCIAL use only")
     ap.add_argument("--fast", action="store_true",
                     help="skip SAM refinement: SegFormer masks at working resolution (blocky edges)")
     args = ap.parse_args()
@@ -346,7 +359,10 @@ def main() -> None:
     scores = {"segformer_512_upscaled": edge_alignment(coarse_full, gray_full)}
 
     if args.fast:
-        labels = segment(img, device)
+        if args.parser == "sapiens":
+            labels = sapiens_probs(img, device)[0].argmax(0).astype(np.uint8)
+        else:
+            labels = segment(img, device)
         hands = hand_mask(img, grow=0)
     else:
         # Lift everything to full resolution and redraw the boundaries there.
@@ -361,15 +377,20 @@ def main() -> None:
             pose["points"] = pose["points"] * scale
         if depth is not None:
             depth = depth.resize(orig.size, Image.BILINEAR)
-        print("refining at full resolution (SegFormer letterboxed + SAM 2.1 + edge snapping):")
+        print(f"refining at full resolution ({args.parser} + SAM 2.1 + edge snapping):")
         t = time.time()
-        probs = segformer_probs(orig, SEG_MODEL, device)
-        scores["segformer_letterboxed_fullres"] = edge_alignment(probs.argmax(0).astype(np.uint8), gray_full)
-        print(f"  SegFormer at full res ({time.time() - t:.1f}s)")
+        sap_hands = None
+        if args.parser == "sapiens":
+            probs, sap_hands = sapiens_probs(orig, device)
+        else:
+            probs = segformer_probs(orig, SEG_MODEL, device)
+        scores[f"{args.parser}_fullres"] = edge_alignment(probs.argmax(0).astype(np.uint8), gray_full)
+        print(f"  {args.parser} at full res ({time.time() - t:.1f}s)")
         legs_visible = pose is not None and any(
             pose["in_frame"][i] and pose["visibility"][i] > 0.5 for i in (25, 26, 27, 28))
         out = refine(orig, probs, face["oval"] if face is not None else None, hand_lms, device, LABELS,
-                     legs_visible=legs_visible)
+                     legs_visible=legs_visible, extra_hands=sap_hands,
+                     merge_garments=args.parser == "segformer")
         del probs
         scores["sam_before_snap"] = edge_alignment(out["sam_labels"], gray_full)
         labels, hands = out["labels"], out["hands"]
@@ -413,6 +434,7 @@ def main() -> None:
     report = {
         "image": str(args.image), "size": list(orig.size), "device": device,
         "mode": "fast" if args.fast else "precise",
+        "parser": args.parser + (" (CC-BY-NC-4.0, non-commercial)" if args.parser == "sapiens" else ""),
         "edge_alignment": {k: round(v, 3) for k, v in scores.items()},
         "framing": framing(pose, labels),
         "clothing": {k: v for k, v in present.items() if v["kind"] == "garment"},
