@@ -537,5 +537,9 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
         arm = arm if arm in (14, 15) else 14
         labels[piece & ~np.isin(labels, (14, 15))] = arm
     log(f"  edge snapping ({time.time() - t:.1f}s), {sam.calls} SAM passes")
+    calls = sam.calls
+    del sam                      # free the GPU for whatever runs next (diffusion needs it all)
+    if device == "cuda":
+        torch.cuda.empty_cache()
     return {"labels": labels, "sam_labels": sam_labels, "hands": hands_m,
-            "person": labels > 0, "sam_calls": sam.calls}
+            "person": labels > 0, "sam_calls": calls}

@@ -16,6 +16,13 @@ Pipeline:
   3. Composite: original pixels are kept everywhere outside the feathered mask, so face,
      hair, skin and background come back pixel-identical.
 
+Masks (--masks): 'precise' (default when SAM 2.1 is in checkpoints/) builds them with the
+analyzer (scripts/analyze_person.py): full-resolution, edge-snapped labels, straps returned to
+their garment, hands traced finger by finger. The result is then composited onto the ORIGINAL
+full-size photo, so everything outside the clothes keeps its full resolution. 'fast' is the old
+512 px SegFormer mask and a working-resolution output. --parser sapiens uses Meta's Sapiens for
+the labels (better on close-ups; CC-BY-NC-4.0, non-commercial only).
+
 Usage:
   venv/Scripts/python.exe scripts/change_clothes.py photo.jpg "a black leather jacket and blue jeans"
   venv/Scripts/python.exe scripts/change_clothes.py photo.jpg --upper "a white linen shirt" --lower "beige chinos"
@@ -65,7 +72,7 @@ CKPT = ROOT / "checkpoints"
 
 def local_or_hub(local: Path, hub_id: str) -> str:
     """Prefer a copy under checkpoints/ (see scripts/download_image_models.py); else the Hub id."""
-    return str(local) if local.is_dir() else hub_id
+    return str(local) if local.is_dir() and any(local.glob("*.json")) else hub_id
 
 
 SEG_MODEL = local_or_hub(CKPT / "segformer-clothes", "mattmdjaga/segformer_b2_clothes")
@@ -132,14 +139,14 @@ def bbox(m: np.ndarray):
     return None if len(xs) == 0 else (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
 
-def neckline_zone(labels: np.ndarray) -> np.ndarray:
+def neckline_zone(labels: np.ndarray, face_ids: tuple[int, ...] = (FACE,)) -> np.ndarray:
     """Shoulders/neck box: from mouth level down to just below the old neckline, about three
     face-widths wide. Thin straps and bare shoulders are labelled skin/background by the
     segmenter, so without this the old neckline survives and the new top is forced into the
     same cut. Face pixels are removed again by PROTECT, so starting high costs nothing.
     (The segmenter's 'face' label includes the neck, so its bottom edge is the neckline.)"""
     up = bbox(np.isin(labels, list(UPPER)))
-    face = bbox(labels == FACE)
+    face = bbox(np.isin(labels, face_ids))
     if up is None or face is None:
         return np.zeros(labels.shape, bool)
     fx0, fy0, fx1, fy1 = face
@@ -217,11 +224,12 @@ def hand_mask(img: Image.Image, grow: int) -> np.ndarray:
 
 
 def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, protect: set[int],
-               hands: np.ndarray | None = None) -> Image.Image:
+               hands: np.ndarray | None = None, fuzz: int | None = None,
+               always: set[int] = PROTECT, face_ids: tuple[int, ...] = (FACE,)) -> Image.Image:
     import cv2
 
     mask = np.isin(labels, list(parts))
-    zone = neckline_zone(labels) if neckline else np.zeros(labels.shape, bool)
+    zone = neckline_zone(labels, face_ids) if neckline else np.zeros(labels.shape, bool)
     mask |= zone
     mask = mask.astype(np.uint8) * 255
     if grow > 0:
@@ -234,14 +242,44 @@ def build_mask(labels: np.ndarray, parts: set[int], grow: int, neckline: bool, p
     keep = np.isin(labels, list(protect))
     # shoulders are labelled 'arm'; inside the neckline zone they must be repaintable or the
     # old straps survive. Face/hair stay protected everywhere.
-    keep &= ~(zone & ~np.isin(labels, list(PROTECT)))
+    keep &= ~(zone & ~np.isin(labels, list(always)))
     if hands is not None:
         keep |= hands  # SD1.5 cannot draw hands; keep the real ones whatever else is repainted
     keep = keep.astype(np.uint8)
-    e = max(3, grow // 2)  # segmenter boundaries are fuzzy by ~8 px at 768
+    # segmenter boundaries are fuzzy by ~8 px at 768; precise (edge-snapped) ones by ~1 px
+    e = fuzz if fuzz is not None else max(3, grow // 2)
     keep = cv2.erode(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * e + 1, 2 * e + 1)))
     mask[keep.astype(bool)] = 0
     return Image.fromarray(mask, "L")
+
+
+def match_grain(generated: Image.Image, original: Image.Image, mask: Image.Image, seed: int) -> Image.Image:
+    """Give upscaled generated pixels the photo's own sensor grain.
+
+    The garment is rendered at the working resolution and upscaled into the full-size photo,
+    so it comes out smoother than the real skin and fabric around it and the seam shows. The
+    grain of the untouched area is measured (robust std of the fine-detail residual) and the
+    missing amount is added back as luminance noise, inside the mask only.
+    """
+    import cv2
+
+    def fine_std(img: np.ndarray, where: np.ndarray) -> float:
+        g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        r = (g - cv2.GaussianBlur(g, (0, 0), 1.2))[where]
+        return float(1.4826 * np.median(np.abs(r - np.median(r)))) if r.size else 0.0
+
+    orig = np.asarray(original)
+    gen = np.asarray(generated).astype(np.float32)
+    m = np.asarray(mask).astype(np.float32) / 255
+    want, have = fine_std(orig, m < 0.01), fine_std(gen.astype(np.uint8), m > 0.99)
+    add = np.sqrt(max(0.0, want ** 2 - have ** 2))
+    if add < 0.3:
+        return generated
+    noise = np.random.default_rng(seed).normal(0, 1, m.shape).astype(np.float32)
+    noise = cv2.GaussianBlur(noise, (0, 0), 0.6)            # sensor grain is not pure per-pixel
+    noise *= add / max(1e-6, float(noise.std()))
+    out = gen + (noise * m)[..., None]
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
 def load_flux(model: str, prompts: list[str], device: str):
@@ -322,6 +360,11 @@ def main() -> None:
     ap.add_argument("--lora-scale", type=float, default=0.8)
     ap.add_argument("--out", type=Path, default=Path("outputs/clothes"))
     ap.add_argument("--mask-only", action="store_true", help="only write the mask, don't run diffusion")
+    ap.add_argument("--masks", choices=["precise", "fast"], default=None,
+                    help="precise: full-res edge-snapped masks + full-size output (default when SAM 2.1 "
+                         "is downloaded); fast: 512 px SegFormer masks, working-resolution output")
+    ap.add_argument("--parser", choices=["segformer", "sapiens"], default="segformer",
+                    help="precise masks only: sapiens is better on close-ups but NON-COMMERCIAL (CC-BY-NC-4.0)")
     args = ap.parse_args()
 
     # passes: (parts, prompt). --upper/--lower are separate passes; lower first so the top overlaps it.
@@ -334,7 +377,7 @@ def main() -> None:
     else:
         ap.error("need a prompt or --upper/--lower")
 
-    engine = args.engine or ("flux" if FLUX_DIR.is_dir() else "sd15")
+    engine = args.engine or ("flux" if (FLUX_DIR / "model_index.json").exists() else "sd15")
     if args.sdxl or args.lora:
         engine = "sd15"  # SDXL and the SD1.5 LoRA only exist on that path
     for k, v in DEFAULTS[engine].items():
@@ -355,21 +398,42 @@ def main() -> None:
     print(f"engine={engine}  image {img.size[0]}x{img.size[1]}  device={device}")
 
     t0 = time.time()
-    labels = segment(img, device)
+    from refine_masks import APPAREL, SAM_MODEL, SKIN
+    precise = (args.masks or ("precise" if (SAM_MODEL / "config.json").exists() else "fast")) == "precise"
+    labels_full = hands_full = None
+    if precise:
+        from analyze_person import precise_labels
+        res = precise_labels(src, device, args.parser)
+        labels_full, hands_full = res["labels"], res["hands"]
+        labels = np.asarray(Image.fromarray(labels_full).resize(img.size, Image.NEAREST))
+        hands = np.asarray(Image.fromarray(hands_full.astype(np.uint8) * 255).resize(img.size, Image.BILINEAR)) > 127
+    else:
+        labels = segment(img, device)
+        hands = hand_mask(img, args.grow // 2)
     found = sorted({LABELS[i] for i in np.unique(labels) if i in PARTS["full"]})
-    print(f"segmented in {time.time() - t0:.1f}s, clothes found: {found or 'none'}")
+    print(f"segmented ({'precise' if precise else 'fast'}) in {time.time() - t0:.1f}s, clothes found: {found or 'none'}")
 
     control = not flux and not args.no_control and not args.sdxl
     # hands: keep only what the segmenter also calls skin, so fabric between the fingers is repainted
-    hands = hand_mask(img, args.grow // 2) & ~np.isin(labels, list(PARTS["full"]))
+    hands &= ~np.isin(labels, list(PARTS["full"]))
+    if precise:
+        hands_full &= ~np.isin(labels_full, list(PARTS["full"]))
     if hands.any():
         print(f"hands detected, protected ({hands.mean():.1%} of the image)")
-    masks, kept = [], []
+    masks, kept, settings = [], [], []
     if len(passes) > 1 or passes[0][0] != "full":
         labels = split_dress(labels)
+        if precise:
+            labels_full = split_dress(labels_full)
+    fuzz = 1 if precise else None
     for parts_name, text in passes:
         parts = set(PARTS[parts_name])
-        protect = set(PROTECT)
+        # Precise labels split SegFormer's 'face' into face + neck/chest skin (SKIN). The old
+        # 'face' label - neck and chest included - was always protected, so SKIN is too: the
+        # upgrade sharpens the masks without changing what gets repainted. Earrings stay real.
+        always = PROTECT | ({SKIN, APPAREL} if precise else set())
+        face_ids = (FACE, SKIN) if precise else (FACE,)   # what SegFormer's 'face' used to cover
+        protect = set(always)
         # bare arms/legs: repaint them (sleeves, trousers) or keep hands/feet exactly as they are
         for flag, group in ((args.cover_arms, ARMS), (args.cover_legs, LEGS)):
             if flag:
@@ -377,7 +441,7 @@ def main() -> None:
             else:
                 protect |= group
         neckline = parts_name != "lower" and not args.no_neckline
-        mask = build_mask(labels, parts, args.grow, neckline, protect, hands)
+        mask = build_mask(labels, parts, args.grow, neckline, protect, hands, fuzz, always, face_ids)
         coverage = np.asarray(mask).mean() / 255
         if coverage < 0.005:
             # e.g. --lower on a half-body shot: nothing there, carry on with the other passes
@@ -387,12 +451,25 @@ def main() -> None:
         print(f"pass '{parts_name}': mask covers {coverage:.1%}  <- {text}")
         kept.append((parts_name, text))
         masks.append(mask)
+        settings.append((parts, neckline, protect, always, face_ids))
     passes = kept
     if not masks:
         raise SystemExit(f"nothing to repaint - clothes found: {', '.join(found) or 'none'}. Try --parts full.")
     union = Image.fromarray(np.maximum.reduce([np.asarray(m) for m in masks]), "L")
     mask_path = save(union, args.out / f"{stem}_mask.png")
     print(f"mask -> {mask_path}")
+
+    if precise:
+        # The same masks rebuilt from the full-resolution labels; the generated clothes are
+        # upscaled into them and everything else stays the original full-size photo. A narrow
+        # outward feather (~0.25% of the image) hides the seam without blurring hands or hair.
+        k = src.size[0] / img.size[0]
+        full = [build_mask(labels_full, parts, round(args.grow * k), neck, prot, hands_full, 1, alw, fids)
+                for parts, neck, prot, alw, fids in settings]
+        union_full = Image.fromarray(np.maximum.reduce([np.asarray(m) for m in full]), "L")
+        save(union_full, args.out / f"{stem}_mask_full.png")
+        union_full_soft = ImageChops.lighter(
+            union_full.filter(ImageFilter.GaussianBlur(max(2, max(src.size) / 400))), union_full)
     if args.mask_only:
         return
 
@@ -402,7 +479,7 @@ def main() -> None:
         # edges only from neck/collarbone/jewelry (the segmenter's 'face' label) inside the mask -
         # never the old garment, background, or the thin strip beside arms/legs, where an outline
         # edge makes the model draw a fabric hem along the limb
-        skin = (np.asarray(union) > 0) & (labels == FACE)
+        skin = (np.asarray(union) > 0) & np.isin(labels, (FACE, SKIN) if precise else (FACE,))
         guides[img.size] = [depth_map(img, old_clothes, device), edge_map(img, skin)]
         save(guides[img.size][0], args.out / f"{stem}_depth.png")
         save(guides[img.size][1], args.out / f"{stem}_edges.png")
@@ -430,6 +507,7 @@ def main() -> None:
         pipe.fuse_lora(lora_scale=args.lora_scale)
 
     base_seed = args.seed if args.seed is not None else int(torch.seed() % 2**31)
+
 
     def feather(m: Image.Image, side: int) -> Image.Image:
         """Outward-only feather: 100% new pixels inside the mask, soft falloff outside it.
@@ -490,6 +568,9 @@ def main() -> None:
             up = final.resize(img_hi.size, Image.LANCZOS)
             refined = run(up, union_hi, ", ".join(t for _, t in passes), args.refine_strength, seed)
             final = Image.composite(refined, img_hi, soft_hi)
+        if precise:
+            up = match_grain(final.resize(src.size, Image.LANCZOS), src, union_full_soft, seed)
+            final = Image.composite(up, src, union_full_soft)
         path = save(final, args.out / f"{stem}_{i}_seed{seed}.png")
         print(f"[{i + 1}/{args.num}] {time.time() - t0:.1f}s  seed={seed}  {final.size[0]}x{final.size[1]}  -> {path}")
         seed += 1

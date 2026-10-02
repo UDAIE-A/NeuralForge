@@ -323,6 +323,53 @@ def draw_overlay(img: Image.Image, labels: np.ndarray, face: dict | None, pose: 
     return out
 
 
+def precise_labels(orig: Image.Image, device: str, parser: str = "segformer", max_side: int = 1024,
+                   log=print) -> dict:
+    """Full-resolution label map + hand mask for `orig` (the analyzer's precise path).
+
+    Landmark detectors run on a `max_side` copy; their points are lifted to full resolution.
+    Returns labels (H, W uint8, LABELS ids), hands (H, W bool), face / pose (full-res points or
+    None) and edge-alignment scores. Used by this script and by change_clothes.py.
+    """
+    import cv2
+
+    img = fit_image(orig, max_side)
+    scale = orig.size[0] / img.size[0]
+    face = detect_face(img)
+    pose = detect_pose(img)
+    hand_lms = [lm * scale for lm in detect_hands(img)]
+    if face is not None:
+        face["points"] = face["points"] * scale
+        oval = np.zeros(orig.size[::-1], np.uint8)
+        cv2.fillConvexPoly(oval, cv2.convexHull(face["points"].astype(np.int32)), 255)
+        face["oval"] = oval.astype(bool)
+    if pose is not None:
+        pose["points"] = pose["points"] * scale
+
+    log(f"refining at full resolution ({parser} + SAM 2.1 + edge snapping):")
+    gray = np.asarray(orig.convert("L"))
+    scores = {}
+    t = time.time()
+    sap_hands = None
+    if parser == "sapiens":
+        probs, sap_hands = sapiens_probs(orig, device)
+    else:
+        probs = segformer_probs(orig, SEG_MODEL, device)
+    scores[f"{parser}_fullres"] = edge_alignment(probs.argmax(0).astype(np.uint8), gray)
+    log(f"  {parser} at full res ({time.time() - t:.1f}s)")
+    legs_visible = pose is not None and any(
+        pose["in_frame"][i] and pose["visibility"][i] > 0.5 for i in (25, 26, 27, 28))
+    out = refine(orig, probs, face["oval"] if face is not None else None, hand_lms, device, LABELS,
+                 legs_visible=legs_visible, extra_hands=sap_hands,
+                 merge_garments=parser == "segformer", log=log)
+    del probs
+    scores["sam_before_snap"] = edge_alignment(out["sam_labels"], gray)
+    labels, straps = absorb_straps(out["labels"])
+    if straps:
+        log(f"merged {straps} strap piece(s) the parser labelled 'bag' into the garment they hang from")
+    return {"labels": labels, "hands": out["hands"], "face": face, "pose": pose, "scores": scores}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image", type=Path)
@@ -350,54 +397,27 @@ def main() -> None:
     scale = orig.size[0] / img.size[0]          # working pixels -> original pixels
     print(f"{args.image.name}: {orig.size[0]}x{orig.size[1]}, analysing at {img.size[0]}x{img.size[1]} on {device}")
 
-    # Landmark detectors run at working resolution; their points are exact enough to lift.
-    face = detect_face(img)
-    pose = detect_pose(img)
     depth = None if args.no_depth else estimate_depth(img, device)
     gray_full = np.asarray(orig.convert("L"))
     coarse_full = np.asarray(Image.fromarray(segment(img, device)).resize(orig.size, Image.NEAREST))
     scores = {"segformer_512_upscaled": edge_alignment(coarse_full, gray_full)}
 
     if args.fast:
+        face = detect_face(img)
+        pose = detect_pose(img)
         if args.parser == "sapiens":
             labels = sapiens_probs(img, device)[0].argmax(0).astype(np.uint8)
         else:
             labels = segment(img, device)
         hands = hand_mask(img, grow=0)
+        labels, straps = absorb_straps(labels)
     else:
-        # Lift everything to full resolution and redraw the boundaries there.
-        import cv2
-        hand_lms = [lm * scale for lm in detect_hands(img)]
-        if face is not None:
-            face["points"] = face["points"] * scale
-            oval = np.zeros(orig.size[::-1], np.uint8)
-            cv2.fillConvexPoly(oval, cv2.convexHull(face["points"].astype(np.int32)), 255)
-            face["oval"] = oval.astype(bool)
-        if pose is not None:
-            pose["points"] = pose["points"] * scale
+        res = precise_labels(orig, device, args.parser, args.max_side)
+        labels, hands, face, pose = res["labels"], res["hands"], res["face"], res["pose"]
+        scores.update(res["scores"])
         if depth is not None:
             depth = depth.resize(orig.size, Image.BILINEAR)
-        print(f"refining at full resolution ({args.parser} + SAM 2.1 + edge snapping):")
-        t = time.time()
-        sap_hands = None
-        if args.parser == "sapiens":
-            probs, sap_hands = sapiens_probs(orig, device)
-        else:
-            probs = segformer_probs(orig, SEG_MODEL, device)
-        scores[f"{args.parser}_fullres"] = edge_alignment(probs.argmax(0).astype(np.uint8), gray_full)
-        print(f"  {args.parser} at full res ({time.time() - t:.1f}s)")
-        legs_visible = pose is not None and any(
-            pose["in_frame"][i] and pose["visibility"][i] > 0.5 for i in (25, 26, 27, 28))
-        out = refine(orig, probs, face["oval"] if face is not None else None, hand_lms, device, LABELS,
-                     legs_visible=legs_visible, extra_hands=sap_hands,
-                     merge_garments=args.parser == "segformer")
-        del probs
-        scores["sam_before_snap"] = edge_alignment(out["sam_labels"], gray_full)
-        labels, hands = out["labels"], out["hands"]
         img, scale = orig, 1.0
-    labels, straps = absorb_straps(labels)
-    if straps:
-        print(f"merged {straps} strap piece(s) the parser labelled 'bag' into the garment they hang from")
     scores["final"] = edge_alignment(np.asarray(Image.fromarray(labels).resize(orig.size, Image.NEAREST)), gray_full)
 
     # Body silhouette without arms, hands and hair: what garments are fitted to.
