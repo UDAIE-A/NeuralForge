@@ -57,3 +57,6 @@ Thumbs.db
 
 # Generated images
 outputs/
+
+# Raw downloaded datasets
+data/*.jsonl
