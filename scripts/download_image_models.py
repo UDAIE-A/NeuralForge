@@ -13,6 +13,9 @@ Fetches (~8.5 GB total):
   checkpoints/controlnet-canny     ControlNet canny: neck/jewelry edges (change_clothes.py)
   checkpoints/depth-anything-small depth estimator for the depth guide
   checkpoints/hand_landmarker.task MediaPipe hand detector so hands are never repainted
+  checkpoints/face_landmarker.task MediaPipe 478-point face mesh (analyze_person.py)
+  checkpoints/pose_landmarker_heavy.task MediaPipe 33-point body pose + silhouette (analyze_person.py)
+  checkpoints/sam2.1-large         SAM 2.1, Apache-2.0, ~860 MB: full-res mask edges (refine_masks.py)
   checkpoints/flux2-klein-4b       (--flux) FLUX.2 klein 4B inpainting, Apache-2.0, ~16 GB
 """
 
@@ -42,13 +45,18 @@ snapshot_download("lllyasviel/control_v11f1p_sd15_depth", local_dir=CKPT / "cont
                   allow_patterns=["config.json", "diffusion_pytorch_model.fp16.safetensors"])
 snapshot_download("lllyasviel/control_v11p_sd15_canny", local_dir=CKPT / "controlnet-canny",
                   allow_patterns=["config.json", "diffusion_pytorch_model.fp16.safetensors"])
+snapshot_download("facebook/sam2.1-hiera-large", local_dir=CKPT / "sam2.1-large",
+                  allow_patterns=["*.json", "*.safetensors", "*.md"])
 snapshot_download("depth-anything/Depth-Anything-V2-Small-hf", local_dir=CKPT / "depth-anything-small",
                   allow_patterns=["*.json", "*.safetensors"])
-hand = CKPT / "hand_landmarker.task"
-if not hand.exists():
-    urllib.request.urlretrieve(
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-        hand)
+MP = "https://storage.googleapis.com/mediapipe-models"
+for name, url in [
+    ("hand_landmarker.task", f"{MP}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"),
+    ("face_landmarker.task", f"{MP}/face_landmarker/face_landmarker/float16/1/face_landmarker.task"),
+    ("pose_landmarker_heavy.task", f"{MP}/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"),
+]:
+    if not (CKPT / name).exists():
+        urllib.request.urlretrieve(url, CKPT / name)
 if args.flux:
     target = args.flux_dir or CKPT / "flux2-klein-4b"
     snapshot_download("black-forest-labs/FLUX.2-klein-4B", local_dir=target,
