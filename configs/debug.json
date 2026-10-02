@@ -1,0 +1,12 @@
+{
+  "preset": "tiny",
+  "name": "debug",
+  "data": ["data/high_quality.txt"],
+  "vocab_size": 2000,
+  "seq_len": 256,
+  "batch_size": 2,
+  "grad_accum": 16,
+  "epochs": 1,
+  "lr": 0.00015,
+  "max_steps": 50
+}

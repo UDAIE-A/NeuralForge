@@ -1,0 +1,12 @@
+{
+  "preset": "small",
+  "name": "small",
+  "data": ["data/training_40mb.txt"],
+  "vocab_size": 8000,
+  "seq_len": 512,
+  "batch_size": 8,
+  "grad_accum": 4,
+  "epochs": 5,
+  "lr": 0.0003,
+  "early_stopping": 3
+}

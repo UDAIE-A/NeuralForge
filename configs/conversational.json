@@ -1,0 +1,11 @@
+{
+  "preset": "small",
+  "name": "conversational",
+  "data": ["data/combined_train.txt"],
+  "vocab_size": 10000,
+  "seq_len": 512,
+  "batch_size": 16,
+  "epochs": 10,
+  "lr": 0.0003,
+  "early_stopping": 3
+}
