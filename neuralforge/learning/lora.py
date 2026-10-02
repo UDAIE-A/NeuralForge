@@ -103,6 +103,31 @@ def count_lora_params(model):
 
 
 @torch.no_grad()
+def merged_state_dict(model):
+    """A plain-NeuralForge state_dict with every adapter folded in.
+
+    Unlike merge_lora this leaves the model wrapped, so a live learner can
+    save a checkpoint and keep teaching. Unwrapping in place left the
+    optimizer holding adapter tensors that were no longer in the model, and
+    every lesson after a save silently changed nothing.
+    Returns (state_dict, merged_layer_count).
+    """
+    lora_names = {name for name, m in model.named_modules() if isinstance(m, LoRALinear)}
+    out = {}
+    for key, tensor in model.state_dict().items():
+        owner, _, leaf = key.rpartition(".")
+        if owner.endswith(".lora_A") or owner.endswith(".lora_B"):
+            continue
+        if owner.endswith(".base_layer") and owner[:-len(".base_layer")] in lora_names:
+            layer_name = owner[:-len(".base_layer")]
+            if leaf == "weight":
+                tensor = model.get_submodule(layer_name).merged_weight()
+            key = f"{layer_name}.{leaf}"
+        out[key] = tensor.detach().to("cpu", copy=True)
+    return out, len(lora_names)
+
+
+@torch.no_grad()
 def merge_lora(model):
     """Fold every adapter back into its base Linear and unwrap.
 

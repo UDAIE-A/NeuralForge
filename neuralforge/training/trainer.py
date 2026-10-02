@@ -42,6 +42,19 @@ class CosineScheduleWithWarmup:
         return self.min_lr + 0.5 * (1.0 - self.min_lr) * (1.0 + math.cos(math.pi * progress))
 
 
+def _display_path(path: str) -> str:
+    """Path relative to the cwd for messages, absolute when that is impossible.
+
+    os.path.relpath raises ValueError on Windows when the path and the cwd are
+    on different drives (checkpoints on C:, repo on D:), which used to crash
+    the run right after the model had been published.
+    """
+    try:
+        return os.path.relpath(path)
+    except ValueError:
+        return os.path.abspath(path)
+
+
 def format_time(seconds: float) -> str:
     """Format seconds into human readable time."""
     if seconds < 60:
@@ -551,9 +564,9 @@ class Trainer:
             print(f"  Best val loss: {self.best_val_loss:.4f}")
             print(f"  Total steps:   {self.global_step}")
             if not self._stop_requested:
-                print(f"  Model:         {os.path.relpath(self.published_path)}")
+                print(f"  Model:         {_display_path(self.published_path)}")
             else:
-                print(f"  Resume:        python train.py --resume {os.path.relpath(self.training_path)}")
+                print(f"  Resume:        python train.py --resume {_display_path(self.training_path)}")
             print("=" * 70)
             
         except KeyboardInterrupt:
@@ -570,8 +583,8 @@ class Trainer:
             print(f"  Steps:     {self.global_step}")
             last_loss = f"{self.epoch_losses[-1]:.4f}" if self.epoch_losses else "N/A"
             print(f"  Last loss: {last_loss}")
-            print(f"  Saved:     {os.path.relpath(self.training_path)}")
-            print(f"  Resume:    python train.py --resume {os.path.relpath(self.training_path)}")
+            print(f"  Saved:     {_display_path(self.training_path)}")
+            print(f"  Resume:    python train.py --resume {_display_path(self.training_path)}")
             print("=" * 70)
     
     def _unwrapped_model(self):
@@ -660,7 +673,7 @@ class Trainer:
                 os.remove(self.training_path)
             except OSError:
                 pass
-        print(f"  Published model -> {os.path.relpath(self.published_path)} "
+        print(f"  Published model -> {_display_path(self.published_path)} "
               f"[weights: {source}]")
 
     def load_checkpoint(self, path: str):

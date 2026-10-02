@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 
-from .lora import inject_lora, freeze_base, lora_state_dict, count_lora_params, merge_lora
+from .lora import inject_lora, freeze_base, lora_state_dict, count_lora_params, merged_state_dict
 from .replay import ReplayBuffer, RegressionProbe
 
 
@@ -308,7 +308,8 @@ class OnlineLearner:
         """Supervised fine-tune toward an ideal (prompt -> answer)."""
         with self._lock:
             before = self.eval_loss(prompt, answer)
-            after = self._train_example(prompt, answer)
+            self._train_example(prompt, answer)
+            after = self.eval_loss(prompt, answer)
             self._record("demonstrate", prompt, answer, None, before, after)
             return self._result(before, after)
 
@@ -316,7 +317,8 @@ class OnlineLearner:
         """Reinforce a model response the human liked."""
         with self._lock:
             before = self.eval_loss(prompt, response)
-            after = self._train_example(prompt, response)
+            self._train_example(prompt, response)
+            after = self.eval_loss(prompt, response)
             self._record("approve", prompt, response, None, before, after)
             return self._result(before, after)
 
@@ -325,7 +327,8 @@ class OnlineLearner:
         with self._lock:
             if preferred:
                 before = self.eval_loss(prompt, preferred)
-                after = self._train_example(prompt, preferred)
+                self._train_example(prompt, preferred)
+                after = self.eval_loss(prompt, preferred)
                 self._record("correct", prompt, preferred, None, before, after)
                 return self._result(before, after)
             before = self.eval_loss(prompt, response)
@@ -396,8 +399,9 @@ class OnlineLearner:
 
         In LoRA mode the adapter is folded into the base weights by default, so
         the result is an ordinary checkpoint that loads into an unmodified
-        NeuralForge. Pass merge=False to keep the model wrapped and store only
-        the adapter tensors (a few MB) alongside it.
+        NeuralForge. Pass merge=False to store only the adapter tensors (a few
+        MB) instead. Either way the live model stays wrapped, so teaching can
+        continue after a save.
         """
         parent = os.path.dirname(path)
         if parent:
@@ -419,10 +423,11 @@ class OnlineLearner:
             artifact["model_state_dict"] = None
         else:
             if self.lora_rank:
-                merged = merge_lora(self.model)
+                state, merged = merged_state_dict(self.model)
                 meta["lora_merged_layers"] = merged
-                self.lora_rank = None      # the wrapper is gone after merging
-            artifact["model_state_dict"] = self.model.state_dict()
+                artifact["model_state_dict"] = state
+            else:
+                artifact["model_state_dict"] = self.model.state_dict()
 
         torch.save(artifact, path)
         return path
