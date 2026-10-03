@@ -121,6 +121,10 @@ def list_checkpoints():
     found = []
     for base in ("checkpoints", "runs"):
         for p in glob.glob(os.path.join(ROOT, base, "**", "*.pt"), recursive=True):
+            # a folder with config.json is a downloaded HF model (e.g. segformer-clothes ships
+            # optimizer.pt / scheduler.pt) - not something the chat can load
+            if os.path.exists(os.path.join(os.path.dirname(p), "config.json")):
+                continue
             rel = os.path.relpath(p, ROOT).replace("\\", "/")
             found.append({
                 "path": rel,
@@ -318,14 +322,19 @@ def _training_worker(params):
 # ----------------------------------------------------------------------------
 # REST endpoints
 # ----------------------------------------------------------------------------
+# The pages change with the API; a tab restored from cache keeps sending requests the server
+# no longer expects (an old Image Studio asked for FLUX before it was downloaded).
+NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(STATIC, "index.html"))
+    return FileResponse(os.path.join(STATIC, "index.html"), headers=NO_CACHE)
 
 
 @app.get("/image")
 def image_studio():
-    return FileResponse(os.path.join(STATIC, "image.html"))
+    return FileResponse(os.path.join(STATIC, "image.html"), headers=NO_CACHE)
 
 
 @app.get("/api/info")
