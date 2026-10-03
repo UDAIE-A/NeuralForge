@@ -311,8 +311,12 @@ python scripts/change_clothes.py photo.jpg "a navy suit with a white shirt" --co
 | `--upper "..." --lower "..."` | separate passes per garment, so colours/fabrics don't blend between them |
 | `--ref photo.jpg` | flux: a photo of the garment to wear; describe it briefly in the prompt too |
 | `--cover-arms` / `--cover-legs` | also repaint bare skin (sleeves over a tank top, trousers over a skirt); hands are still protected |
+| `--no-auto-cover` | by default the two above switch on by themselves when the prompt names sleeves (jacket, shirt, tee, suit...) or long legwear (jeans, trousers, maxi...); this keeps bare arms/legs as they are |
+| `--expose` / `--no-expose` | repaint the bare torso above the old neckline, so a top that shows more skin than the old one has somewhere to go. On by itself for bikini, swimsuit, tube top, bandeau, halter, bralette, crop top, strapless, spaghetti strap, off-shoulder. Without it a bikini over a strapless top is painted inside the old neckline and the cups come out sliced off |
 | `--grow N` | widen the mask (default 20 px) so the new garment can take its own shape |
 | `--no-neckline` | keep the old neckline exactly (by default shoulders/neck are repainted so any collar or straps are possible) |
+| `--no-coverage` | skip the measured body-coverage plan (`scripts/coverage.py`). By default the mask is kept out of bare skin the requested garment does not cover, so a saree or crop top keeps its bare midriff and a strapless top keeps its shoulders |
+| `--no-skin-tone` | do not measure the subject's skin tone and put it in the prompt |
 | `--num N` / `--seed S` | number of variations / reproducible seed |
 | `--engine flux\|sd15` | force an engine; `--lora` and `--sdxl` imply `sd15` |
 | `--steps` / `--guidance` / `--res` | per-engine defaults: flux 4 / 1.0 / 1024, sd15 30 / 7.0 / 768 |
@@ -323,8 +327,11 @@ Outputs go to `outputs/clothes/`. Only use it on photos of yourself or people wh
 
 Weights live in `checkpoints/` (gitignored). Fetch them once with
 `python scripts/download_image_models.py [--flux]`; after that everything runs offline.
-FLUX needs 12 GB VRAM: prompts are encoded first with the 8 GB text encoder, which is then
-dropped so the 7.7 GB transformer can stay resident.
+FLUX needs 12 GB VRAM: the 7.5 GB text encoder and the 7.3 GB transformer take turns on the
+GPU. In Image Studio the worker keeps both loaded between jobs (transformer on the GPU, text
+encoder in system RAM, ~16 GB of RAM in all), so only the first job reads them from disk: a
+repeated prompt starts generating at once, a new one costs a ~5 s swap. The mask models are
+released before FLUX generates, and switching to SD 1.5 releases FLUX.
 
 ### Image Studio (web UI)
 
