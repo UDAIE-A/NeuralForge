@@ -1,5 +1,10 @@
-"""Image Studio API: runs scripts/change_clothes.py and scripts/train_identity_lora.py as
-subprocess jobs and streams their logs, so the CLI scripts stay the single source of truth.
+"""Image Studio API.
+
+Change-clothes jobs go to ONE long-lived worker process (scripts/studio_worker.py) that keeps
+its models on the GPU between jobs: Stop cancels the running job and keeps them loaded;
+Unload kills the worker, which is guaranteed to give the memory back. LoRA training and
+sampling still run as one-off subprocesses (and unload the worker first - they need the GPU).
+The CLI scripts stay the single source of truth for what a job does.
 
 Mounted by webui/server.py under /api/image; the page is webui/static/image.html at /image.
 One job at a time - there is one GPU.
@@ -7,8 +12,11 @@ One job at a time - there is one GPU.
 
 from __future__ import annotations
 
+import atexit
+import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -29,6 +37,7 @@ OUT = ROOT / "outputs"
 UPLOADS = OUT / "uploads"
 LORA_DIR = CKPT / "lora"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+STOP_GRACE_S = 10  # Stop waits this long for a clean cancel before killing the worker
 
 router = APIRouter(prefix="/api/image")
 
@@ -98,6 +107,151 @@ class Job:
         }
 
 
+class WorkerJob(Job):
+    """A change-clothes job executed by the resident worker instead of its own process."""
+
+    def __init__(self, argv: list[str], out_dir: Path, meta: dict):
+        super().__init__("clothes", argv, out_dir, meta)
+
+    def start(self):
+        WORKER.run(self)
+
+    def stop(self):
+        if self.status == "running":
+            self.status = "stopping"
+            WORKER.send({"cmd": "cancel"})
+            # cancel is only seen between steps; a model download or load never checks it,
+            # so if the job is still going after a grace period, kill the worker instead
+            threading.Timer(STOP_GRACE_S, self._force_stop).start()
+
+    def _force_stop(self):
+        if self.status == "stopping" and WORKER.job is self:
+            self.log.append(f"did not stop within {STOP_GRACE_S}s (loading a model?) - killing the worker")
+            WORKER.kill()
+
+    def finish(self, rc: int):
+        self.returncode = rc
+        self.ended = time.time()
+        self.status = "done" if rc == 0 else ("stopped" if rc == 130 or self.status == "stopping" else "error")
+
+
+class Worker:
+    """Owns the resident studio_worker.py process and routes its output to the current job."""
+
+    def __init__(self):
+        self.proc: subprocess.Popen | None = None
+        self.conn = None
+        self.job: WorkerJob | None = None
+        self.models: dict = {"models": [], "note": ""}
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def _spawn(self):
+        key = secrets.token_hex(16)
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1", STUDIO_KEY=key)
+        self.ready.clear()
+        self.proc = subprocess.Popen([sys.executable, str(SCRIPTS / "studio_worker.py")], cwd=str(ROOT), env=env,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, encoding="utf-8", errors="replace")
+        self._key = key
+        threading.Thread(target=self._pump, args=(self.proc,), daemon=True).start()
+        if not self.ready.wait(120):
+            self.kill()
+            raise HTTPException(500, "the image worker did not start")
+
+    def _line(self, line: str):
+        if line.startswith("@@PORT "):
+            from multiprocessing.connection import Client
+            self.conn = Client(("127.0.0.1", int(line.split()[1])), authkey=self._key.encode())
+        elif line.startswith("@@READY"):
+            self.ready.set()
+        elif line.startswith("@@MODELS "):
+            try:
+                self.models = json.loads(line[9:])
+            except json.JSONDecodeError:
+                pass
+        elif line.startswith("@@END ") and self.job is not None:
+            parts = line.split()
+            self.job.finish(int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 1)
+            self.job = None
+        elif line.startswith("@@"):
+            return
+        elif self.job is not None:
+            log = self.job.log
+            if _NOISE.search(line):
+                return
+            if log and _BAR.search(line) and _BAR.search(log[-1]):
+                log[-1] = line          # tqdm: keep only the latest state of a progress bar
+            else:
+                log.append(line)
+
+    def _pump(self, proc: subprocess.Popen):
+        buf = ""
+        for ch in iter(lambda: proc.stdout.read(1), ""):
+            if ch in ("\n", "\r"):
+                if buf.strip():
+                    self._line(buf.strip())
+                buf = ""
+            else:
+                buf += ch
+        # the process died: whatever was running failed
+        if self.job is not None:
+            self.job.log.append("the image worker exited")
+            self.job.finish(1 if self.job.status != "stopping" else 130)
+            self.job = None
+        self.models = {"models": [], "note": ""}
+
+    def send(self, msg: dict):
+        if self.conn is not None:
+            try:
+                self.conn.send(msg)
+            except OSError:
+                pass
+
+    def run(self, job: WorkerJob):
+        with self.lock:
+            if not self.alive():
+                self._spawn()
+            self.job = job
+            self.send({"cmd": "run", "id": job.id, "argv": job.cmd})
+
+    def kill(self) -> bool:
+        """Force quit: the OS takes back every byte of GPU memory the worker held."""
+        was = self.alive()
+        if self.proc is not None:
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=15)
+            except Exception:
+                pass
+        self.proc, self.conn = None, None
+        self.models = {"models": [], "note": "unloaded"}
+        return was
+
+    def info(self) -> dict:
+        return {"running": self.alive(), "loaded": self.models.get("models", []),
+                "reserved_gb": self.models.get("gpu_reserved_gb"), "note": self.models.get("note", "")}
+
+
+WORKER = Worker()
+atexit.register(WORKER.kill)
+
+
+def _gpu() -> dict | None:
+    """Whole-card usage from nvidia-smi (every process, including games)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5).stdout
+        name, used, total, util = [x.strip() for x in out.splitlines()[0].split(",")]
+        return {"name": name, "used_gb": round(int(used) / 1024, 1), "total_gb": round(int(total) / 1024, 1),
+                "util": int(util)}
+    except Exception:
+        return None
+
+
 _NOISE = re.compile(r"Warning|warn\(|deprecat|Loading weights|Fetching \d+ files|XNNPACK|^I0000|^W0000|Siglip2")
 _BAR = re.compile(r"\d+%\|")
 JOBS: dict[str, Job] = {}
@@ -119,13 +273,21 @@ def _busy() -> Job | None:
     return next((j for j in JOBS.values() if j.status in ("running", "stopping")), None)
 
 
-def _launch(kind: str, cmd: list[str], out_dir: Path | None, meta: dict) -> dict:
+def _launch(kind: str, cmd: list[str], out_dir: Path | None, meta: dict, worker: bool = False) -> dict:
     with JOBS_LOCK:
         if (b := _busy()) is not None:
             raise HTTPException(409, f"a {b.kind} job is already running ({b.id}); one GPU, one job")
-        job = Job(kind, cmd, out_dir, meta)
+        if worker:
+            job = WorkerJob(cmd, out_dir, meta)
+        else:
+            WORKER.kill()   # training/sampling load their own models and need the GPU free
+            job = Job(kind, cmd, out_dir, meta)
         JOBS[job.id] = job
-        job.start()
+        try:
+            job.start()
+        except Exception:
+            del JOBS[job.id]     # never leave a phantom "running" job blocking the GPU
+            raise
     return job.to_dict()
 
 
@@ -150,7 +312,9 @@ def info():
                               "crops": [_url(p) for p in crops]})
     return {
         "engines": {
-            "flux": (CKPT / "flux2-klein-4b").is_dir(),
+            "flux": (CKPT / "flux2-klein-4b" / "model_index.json").exists(),
+            "sam": (CKPT / "sam2.1-large" / "config.json").exists(),
+            "sapiens": any((CKPT / "sapiens-seg-1b").glob("*.pt2")),
             "sd15": (CKPT / "sd15-inpaint").is_dir(),
             "controlnet": (CKPT / "controlnet-depth").is_dir() and (CKPT / "controlnet-canny").is_dir(),
             "hands": (CKPT / "hand_landmarker.task").exists(),
@@ -158,7 +322,17 @@ def info():
         },
         "loras": loras,
         "busy": (b.to_dict() if (b := _busy()) else None),
+        "models": WORKER.info(),
+        "gpu": _gpu(),
     }
+
+
+@router.post("/models/unload")
+def unload_models():
+    """Force quit the worker: frees all its GPU memory. Refused while a job is running."""
+    if (b := _busy()) is not None:
+        raise HTTPException(409, f"stop the running {b.kind} job first")
+    return {"ok": True, "was_running": WORKER.kill()}
 
 
 # ----------------------------------------------------------------------------- uploads
@@ -213,6 +387,7 @@ class ClothesRequest(BaseModel):
     no_neckline: bool = False
     cover_arms: bool = False
     cover_legs: bool = False
+    expose: bool | None = None        # None: on by itself for bikinis/tube tops/halter necks
     res: int | None = None
     hires: int | None = None
     refine_strength: float | None = None
@@ -224,6 +399,8 @@ class ClothesRequest(BaseModel):
     lora_scale: float | None = None
     sdxl: bool = False
     mask_only: bool = False
+    parser: str = "segformer"       # segformer | sapiens (non-commercial)
+    device: str = "auto"            # auto | cuda | cpu
 
 
 @router.post("/clothes")
@@ -233,11 +410,18 @@ def clothes(req: ClothesRequest):
         raise HTTPException(400, "upload the photo first")
     if not (req.prompt or req.upper or req.lower):
         raise HTTPException(400, "describe the outfit (prompt, or upper/lower)")
+    if (req.engine == "flux" or req.ref) and not (CKPT / "flux2-klein-4b" / "model_index.json").exists():
+        # otherwise diffusers quietly starts a ~16 GB download from the Hub mid-job
+        raise HTTPException(400, "FLUX is not downloaded - run scripts/download_image_models.py --flux, "
+                                 "or pick SD 1.5")
     out_dir = OUT / "clothes" / f"{_safe_stem(image.name)}_{uuid.uuid4().hex[:6]}"
-    cmd = [sys.executable, str(SCRIPTS / "change_clothes.py"), str(image), "--out", str(out_dir),
-           "--num", str(req.num), "--parts", req.parts, "--grow", str(req.grow)]
+    # change_clothes.py arguments; the resident worker runs them in-process
+    cmd = [str(image), "--out", str(out_dir), "--num", str(req.num), "--parts", req.parts,
+           "--grow", str(req.grow), "--device", req.device]
     if req.prompt and not (req.upper or req.lower):
-        cmd.insert(3, req.prompt)
+        cmd.insert(1, req.prompt)
+    if req.parser == "sapiens":
+        cmd += ["--parser", "sapiens"]
     for flag, val in (("--upper", req.upper), ("--lower", req.lower), ("--engine", req.engine),
                       ("--seed", req.seed), ("--steps", req.steps), ("--guidance", req.guidance),
                       ("--res", req.res), ("--hires", req.hires), ("--refine-strength", req.refine_strength),
@@ -260,7 +444,11 @@ def clothes(req: ClothesRequest):
                      ("--sdxl", req.sdxl), ("--mask-only", req.mask_only)):
         if on:
             cmd.append(flag)
-    return _launch("clothes", cmd, out_dir, {"image": _url(image), "prompt": req.prompt or f"{req.upper or ''} | {req.lower or ''}"})
+    if req.expose is not None:
+        cmd.append("--expose" if req.expose else "--no-expose")
+    return _launch("clothes", cmd, out_dir, {"image": _url(image), "num": req.num, "mask_only": req.mask_only,
+                                             "prompt": req.prompt or f"{req.upper or ''} | {req.lower or ''}"},
+                   worker=True)
 
 
 # ----------------------------------------------------------------------------- LoRA training

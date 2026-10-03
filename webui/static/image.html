@@ -3,376 +3,579 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NeuralForge Image Studio</title>
+<title>NeuralForge Studio</title>
 <style>
   :root {
-    --bg: #0d1017; --panel: #151922; --panel2: #1b2030; --border: #262d3d;
-    --text: #e6e9ef; --muted: #8b93a7; --accent: #10a37f; --accent2: #2563eb;
-    --danger: #e5534b; --warn: #d9a441; --radius: 12px;
+    --bg: #0b0d12; --panel: #12151c; --raised: #191d27; --line: #252a37; --line2: #313849;
+    --text: #e8eaf0; --muted: #8c93a6; --faint: #5d6478;
+    --accent: #7c6cff; --accent-2: #a594ff; --ok: #2fbf8f; --warn: #e2a33d; --bad: #ef5b5b;
+    --r: 12px; --r-sm: 8px;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
     display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-  a { color: var(--accent); }
-  header { height: 56px; flex: 0 0 56px; display: flex; align-items: center; justify-content: space-between;
-    padding: 0 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; }
-  .brand .logo { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, var(--accent2), #a855f7); }
-  .brand small { color: var(--muted); font-weight: 400; }
-  .hdr-right { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
-  .badge { background: var(--panel2); border: 1px solid var(--border); padding: 5px 10px; border-radius: 20px; display: flex; gap: 7px; align-items: center; color: var(--text); text-decoration: none; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  .dot.off { background: var(--danger); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }
 
-  .split { flex: 1; display: flex; min-height: 0; }
-  .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow-y: auto; }
-  .pane.left { border-right: 1px solid var(--border); }
-  .pane.right { background: var(--panel); }
-  .pane-head { padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 2; }
-  .pane.right .pane-head { background: var(--panel); }
-  .pane-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
-  .pane-head .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .cards { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
-  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-  .card h3 { margin: 0 0 14px; font-size: 13px; font-weight: 650; display: flex; align-items: center; justify-content: space-between; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-  .field { margin-bottom: 12px; min-width: 0; }
-  .field label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
-  input[type=text], input[type=number], select, textarea {
-    width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
-    padding: 9px 11px; font-size: 13.5px; font-family: inherit; }
-  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-  textarea { resize: vertical; min-height: 56px; }
-  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; cursor: pointer; }
-  .check input { accent-color: var(--accent); }
-  .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
-  button { background: var(--accent); color: #fff; border: 0; border-radius: 9px; padding: 10px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
-  button:hover { filter: brightness(1.08); }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  button.ghost { background: var(--panel); border: 1px solid var(--border); color: var(--text); font-weight: 500; }
-  button.danger { background: var(--danger); }
-  button.small { padding: 6px 10px; font-size: 12.5px; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .drop { border: 1.5px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted);
-    cursor: pointer; font-size: 13px; position: relative; min-height: 90px; display: flex; align-items: center; justify-content: center; gap: 12px; }
-  .drop.over { border-color: var(--accent); color: var(--text); }
-  .drop img { max-height: 160px; max-width: 45%; border-radius: 8px; }
-  .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-  details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-bottom: 10px; user-select: none; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
-  .tabs button { background: var(--panel); border: 1px solid var(--border); color: var(--muted); font-weight: 500; padding: 7px 12px; }
-  .tabs button.on { color: var(--text); border-color: var(--accent); }
-  .log { background: #0a0d13; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: 12px/1.5 ui-monospace, Consolas, monospace;
-    color: #b7c0d1; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
-  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .gallery a { display: block; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); }
-  .gallery img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
-  .gallery .cap { font-size: 11px; color: var(--muted); padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .status { font-size: 12.5px; color: var(--muted); }
-  .status b { color: var(--text); }
-  .status .running { color: var(--warn); } .status .done { color: var(--accent); } .status .error { color: var(--danger); }
-  .lora { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel); }
-  .lora .name { font-weight: 600; }
-  .lora .thumbs { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; }
-  .lora .thumbs img { height: 64px; border-radius: 6px; }
-  .pill { font-size: 11px; padding: 2px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
-  .pill.ok { color: var(--accent); border-color: var(--accent); }
-  @media (max-width: 900px) { .split { flex-direction: column; overflow-y: auto; } .pane { overflow: visible; } .pane.left { border-right: 0; border-bottom: 1px solid var(--border); } }
+  /* ---------- header ---------- */
+  header { height: 54px; flex: none; display: flex; align-items: center; gap: 18px; padding: 0 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel); }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: .2px; }
+  .brand i { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #5b8cff, var(--accent) 55%, #d16bff); }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: 0; color: var(--muted); padding: 7px 12px; border-radius: 8px; font-weight: 550; }
+  nav button.on { color: var(--text); background: var(--raised); }
+  .spacer { flex: 1; }
+  .meter { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .bar { width: 90px; height: 6px; background: var(--raised); border-radius: 3px; overflow: hidden; }
+  .bar > b { display: block; height: 100%; width: 0; background: var(--ok); transition: width .4s; }
+  .bar.hot > b { background: var(--warn); } .bar.full > b { background: var(--bad); }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 999px;
+    background: var(--raised); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .pill.live .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .pill button { background: none; border: 0; color: var(--accent-2); padding: 0 0 0 4px; font-size: 12.5px; }
+  .pill button:disabled { color: var(--faint); cursor: default; }
+  header a.link { color: var(--muted); text-decoration: none; font-size: 12.5px; }
+  header a.link:hover { color: var(--text); }
+
+  /* ---------- outfit view ---------- */
+  .view { flex: 1; min-height: 0; }
+  #outfit { display: grid; grid-template-columns: 1fr 380px; }
+  .canvas { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 16px; gap: 12px; }
+  .stage { flex: 1; min-height: 0; position: relative; border-radius: var(--r); background:
+    repeating-conic-gradient(#10131a 0 25%, #0d1016 0 50%) 0 0 / 22px 22px; border: 1px solid var(--line); overflow: hidden; }
+  .drop { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; color: var(--muted); cursor: pointer; border: 2px dashed transparent; border-radius: var(--r); transition: .15s; }
+  .drop.over { border-color: var(--accent); background: rgba(124,108,255,.06); color: var(--text); }
+  .drop .big { font-size: 17px; color: var(--text); font-weight: 600; }
+  .drop svg { opacity: .7; }
+  .view-img { position: absolute; inset: 0; }
+  .view-img img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+  .view-img .after { clip-path: inset(0 0 0 var(--cut, 50%)); }
+  .view-img .maskov { opacity: .5; mix-blend-mode: screen; filter: sepia(1) saturate(6) hue-rotate(250deg); pointer-events: none; }
+  .handle { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); width: 2px; background: #fff; transform: translateX(-1px);
+    cursor: ew-resize; box-shadow: 0 0 8px rgba(0,0,0,.6); }
+  .handle::after { content: "⇆"; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 30px; height: 30px;
+    border-radius: 50%; background: #fff; color: #222; display: grid; place-items: center; font-size: 14px; }
+  .tag { position: absolute; top: 10px; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.55); font-size: 11.5px; color: #ddd; pointer-events: none; }
+  .tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
+  .tool { background: rgba(14,16,22,.75); backdrop-filter: blur(6px); border: 1px solid var(--line2); color: var(--text);
+    border-radius: 8px; padding: 6px 10px; font-size: 12.5px; text-decoration: none; display: inline-flex; gap: 6px; align-items: center; }
+  .tool.on { border-color: var(--accent); color: var(--accent-2); }
+  .strip { flex: none; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; min-height: 74px; }
+  .thumb { flex: none; width: 58px; height: 72px; border-radius: 8px; overflow: hidden; border: 2px solid transparent; background: var(--raised);
+    position: relative; padding: 0; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb.sel { border-color: var(--accent); }
+  .thumb .lab { position: absolute; bottom: 0; left: 0; right: 0; font-size: 10px; background: rgba(0,0,0,.6); color: #ddd; text-align: center; }
+  .thumb.pending { display: grid; place-items: center; border: 1px dashed var(--line2); }
+  .spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line2); border-top-color: var(--accent); animation: sp .8s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  /* ---------- side panel ---------- */
+  .panel { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  .scroll { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+  h2 { font-size: 15px; margin: 0; font-weight: 650; }
+  .lbl { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+  textarea, input[type=text], input[type=number], select {
+    width: 100%; background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 11px; outline: none; }
+  textarea:focus, input:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 70px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { background: var(--raised); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--muted); }
+  .chip:hover { color: var(--text); border-color: var(--line2); }
+  .seg { display: flex; background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px; gap: 3px; }
+  .seg button { flex: 1; border: 0; background: none; color: var(--muted); padding: 6px 4px; border-radius: 6px; font-size: 13px; font-weight: 550; }
+  .seg button.on { background: var(--bg); color: var(--text); box-shadow: 0 1px 0 var(--line2); }
+  .seg button:disabled { opacity: .4; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  .sw { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+  .sw input { accent-color: var(--accent); width: 15px; height: 15px; }
+  .sw:hover { color: var(--text); }
+  .go { display: flex; gap: 8px; }
+  .primary { flex: 1; position: relative; overflow: hidden; border: 0; border-radius: 10px; padding: 12px; font-weight: 650; font-size: 14.5px;
+    color: #fff; background: linear-gradient(135deg, #6a5cff, #8f6bff); }
+  .primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .primary:disabled { cursor: default; }
+  .primary .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(255,255,255,.18); transition: width .5s; }
+  .primary span { position: relative; }
+  .stop { border: 1px solid var(--line2); background: var(--raised); color: var(--text); border-radius: 10px; padding: 0 16px; font-weight: 600; }
+  .stop:hover { border-color: var(--bad); color: var(--bad); }
+  .linkbtn { background: none; border: 0; color: var(--accent-2); padding: 0; font-size: 13px; }
+  .linkbtn:disabled { color: var(--faint); }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .err { color: var(--bad); font-size: 13px; }
+  details.more { border-top: 1px solid var(--line); padding-top: 14px; }
+  details.more > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; }
+  details.more > summary::after { content: "＋"; } details.more[open] > summary::after { content: "－"; }
+  details.more > summary::-webkit-details-marker { display: none; }
+  .opts { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .note { font-size: 11.5px; color: var(--faint); margin-top: 5px; }
+  .miniDrop { border: 1px dashed var(--line2); border-radius: var(--r-sm); padding: 10px; display: flex; gap: 10px; align-items: center;
+    color: var(--muted); font-size: 12.5px; cursor: pointer; position: relative; }
+  .miniDrop img { width: 42px; height: 42px; object-fit: cover; border-radius: 6px; }
+  .miniDrop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .log { background: #07090d; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 10px; max-height: 200px; overflow: auto;
+    font: 11.5px/1.5 ui-monospace, Consolas, monospace; color: #a9b1c3; white-space: pre-wrap; word-break: break-word; margin-top: 10px; }
+
+  /* ---------- identity view ---------- */
+  #identity { overflow-y: auto; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 18px 40px; display: flex; flex-direction: column; gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .step { font-size: 11px; color: var(--accent-2); font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
+  .tdrop { border: 2px dashed var(--line2); border-radius: var(--r); padding: 26px; text-align: center; color: var(--muted); cursor: pointer; position: relative; }
+  .tdrop.over { border-color: var(--accent); color: var(--text); }
+  .tdrop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+  .tgrid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+  .lora { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; }
+  .lora:first-child { border-top: 0; padding-top: 0; }
+  .lora .thumbs { display: flex; gap: 6px; overflow-x: auto; grid-column: 1 / -1; }
+  .lora .thumbs img { height: 70px; border-radius: 6px; }
+  .secondary { background: var(--raised); border: 1px solid var(--line2); border-radius: 9px; padding: 9px 14px; font-weight: 600; }
+  .secondary:hover { border-color: var(--accent); }
+
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; }
+    #outfit { grid-template-columns: 1fr; }
+    .stage { min-height: 60vh; }
+    .panel { border-left: 0; border-top: 1px solid var(--line); }
+    .meter .bar, header a.link { display: none; }
+  }
 </style>
 </head>
 <body>
-  <header>
-    <div class="brand"><div class="logo"></div><div>NeuralForge <small>Image Studio</small></div></div>
-    <div class="hdr-right">
-      <a class="badge" href="/">💬 Text Studio</a>
-      <span class="badge" id="engBadge">engines —</span>
-      <span class="badge"><span class="dot" id="busyDot"></span><span id="busyText">idle</span></span>
-    </div>
-  </header>
+<header>
+  <div class="brand"><i></i>NeuralForge Studio</div>
+  <nav><button class="on" data-view="outfit">Outfit</button><button data-view="identity">Identity</button></nav>
+  <div class="spacer"></div>
+  <div class="meter" title="Memory used on the graphics card, by every program"><span id="gpuName">GPU</span>
+    <div class="bar" id="gpuBar"><b></b></div><span id="gpuText">—</span></div>
+  <span class="pill" id="modelsPill" title="Models stay loaded between runs so the next one starts faster">
+    <span class="dot"></span><span id="modelsText">Models not loaded</span><button id="unloadBtn" disabled>Unload</button></span>
+  <a class="link" href="/">Text Studio →</a>
+</header>
 
-  <div class="split">
-    <!-- LEFT: change clothes -->
-    <div class="pane left">
-      <div class="pane-head"><h2>👕 Change clothes</h2><div class="sub">Repaint only the clothes in a photo. Face, hair, hands and background stay pixel-identical.</div></div>
-      <div class="cards">
-        <div class="card">
-          <h3>Photo</h3>
-          <div class="drop" id="photoDrop"><span id="photoLabel">Drop a photo here or click to choose</span><img id="photoPrev" hidden><input type="file" id="photoFile" accept="image/*"></div>
-        </div>
-
-        <div class="card">
-          <h3>Outfit</h3>
-          <div class="tabs"><button class="on" data-mode="single">One prompt</button><button data-mode="split">Top + bottom</button><button data-mode="ref">From a garment photo</button></div>
-          <div id="modeSingle">
-            <div class="field"><label>Describe the outfit</label><textarea id="prompt" placeholder="a red floral summer dress"></textarea></div>
-            <div class="field"><label>Replace</label>
-              <select id="parts"><option value="full">full outfit</option><option value="upper">top only</option><option value="lower">skirt / trousers only</option></select></div>
-          </div>
-          <div id="modeSplit" hidden>
-            <div class="field"><label>Top</label><input type="text" id="upper" placeholder="a white linen shirt"></div>
-            <div class="field"><label>Bottom</label><input type="text" id="lower" placeholder="beige chinos"></div>
-            <div class="hint">Two passes, so the colours and fabrics of the two garments don't blend into each other.</div>
-          </div>
-          <div id="modeRef" hidden>
-            <div class="drop" id="refDrop" style="min-height:70px"><span id="refLabel">Drop a photo of the garment</span><img id="refPrev" hidden><input type="file" id="refFile" accept="image/*"></div>
-            <div class="field" style="margin-top:10px"><label>Short description of it</label><input type="text" id="refPrompt" placeholder="a lilac t-shirt with dark purple sleeves"></div>
-            <div class="field"><label>Replace</label>
-              <select id="refParts"><option value="upper">top only</option><option value="lower">skirt / trousers only</option><option value="full">full outfit</option></select></div>
-            <div class="hint">FLUX engine only. Turn on "repaint arms" below if the garment has sleeves.</div>
-          </div>
-          <label class="check"><input type="checkbox" id="coverArms"> Repaint bare arms (sleeves, jackets)</label>
-          <label class="check"><input type="checkbox" id="coverLegs"> Repaint bare legs (trousers over a skirt)</label>
-          <label class="check"><input type="checkbox" id="noNeckline"> Keep the old neckline exactly</label>
-        </div>
-
-        <div class="card">
-          <h3>Engine &amp; output</h3>
-          <div class="grid3">
-            <div class="field"><label>Engine</label><select id="engine"><option value="">auto</option><option value="flux">FLUX.2 klein</option><option value="sd15">SD1.5 + ControlNet</option></select></div>
-            <div class="field"><label>Variations</label><input type="number" id="num" value="2" min="1" max="16"></div>
-            <div class="field"><label>Seed</label><input type="number" id="seed" placeholder="random"></div>
-          </div>
-          <details>
-            <summary>Advanced</summary>
-            <div class="grid3">
-              <div class="field"><label>Steps</label><input type="number" id="steps" placeholder="flux 4 / sd15 30"></div>
-              <div class="field"><label>Guidance</label><input type="number" id="guidance" step="0.5" placeholder="sd15 7.0"></div>
-              <div class="field"><label>Resolution</label><input type="number" id="res" step="64" placeholder="1024 / 768"></div>
-              <div class="field"><label>Mask grow (px)</label><input type="number" id="grow" value="20"></div>
-              <div class="field"><label>Identity LoRA (sd15)</label><select id="lora"><option value="">none</option></select></div>
-              <div class="field"><label>LoRA scale</label><input type="number" id="loraScale" step="0.1" placeholder="0.8"></div>
-              <div class="field"><label>sd15: refine res</label><input type="number" id="hires" step="64" placeholder="1024, 0 = off"></div>
-              <div class="field"><label>sd15: refine strength</label><input type="number" id="refine" step="0.05" placeholder="0.35"></div>
-              <div class="field"><label>sd15: depth / edge</label><div class="row" style="flex-wrap:nowrap"><input type="number" id="depthScale" step="0.1" placeholder="0.7"><input type="number" id="edgeScale" step="0.1" placeholder="0.6"></div></div>
-            </div>
-            <div class="field"><label>Negative prompt (sd15)</label><input type="text" id="negative" placeholder="default"></div>
-            <label class="check"><input type="checkbox" id="noControl"> sd15: skip depth/edge ControlNets (faster)</label>
-            <label class="check"><input type="checkbox" id="sdxl"> sd15: use SDXL inpainting instead</label>
-          </details>
-          <div class="row" style="margin-top:8px">
-            <button id="runBtn">Generate</button>
-            <button class="ghost" id="maskBtn" title="Only build the mask, to check what will be repainted">Preview mask</button>
-            <button class="danger" id="stopBtn" hidden>Stop</button>
-            <span class="status" id="runStatus"></span>
-          </div>
-        </div>
-
-        <div class="card" id="resultCard" hidden>
-          <h3>Results <span class="pill" id="resultMeta"></span></h3>
-          <div class="gallery" id="gallery"></div>
-          <details style="margin-top:12px"><summary>Log</summary><div class="log" id="runLog"></div></details>
+<!-- ================================================================ OUTFIT -->
+<main class="view" id="outfit">
+  <section class="canvas">
+    <div class="stage" id="stage">
+      <label class="drop" id="drop">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>
+        <div class="big">Drop a photo</div><div>or click to choose one</div>
+        <input type="file" id="photoInput" accept="image/*" hidden>
+      </label>
+      <div class="view-img" id="viewer" hidden>
+        <img id="imgBefore" alt="original photo">
+        <img id="imgAfter" class="after" alt="result">
+        <img id="imgMask" class="maskov" alt="" hidden>
+        <div class="handle" id="handle"></div>
+        <span class="tag" style="left:10px" id="tagL">Original</span>
+        <span class="tag" style="right:10px; top:auto; bottom:10px" id="tagR">Result</span>
+        <div class="tools">
+          <button class="tool" id="maskTool" title="Show what was repainted">Mask</button>
+          <a class="tool" id="dlTool" download hidden>Download</a>
+          <button class="tool" id="newPhoto" title="Use a different photo">Change photo</button>
         </div>
       </div>
     </div>
+    <div class="strip" id="strip" hidden></div>
+  </section>
 
-    <!-- RIGHT: identity LoRA -->
-    <div class="pane right">
-      <div class="pane-head"><h2>🧬 Identity LoRA</h2><div class="sub">Teach the SD1.5 engine one person from their photos. Only your own photos, or people who have agreed.</div></div>
-      <div class="cards">
-        <div class="card">
-          <h3>Train</h3>
-          <div class="drop" id="trainDrop"><span id="trainLabel">Drop 5–15 clear photos of one person (or click)</span><input type="file" id="trainFiles" accept="image/*" multiple></div>
-          <div class="gallery" id="trainThumbs" style="margin-top:10px; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));"></div>
-          <div class="grid2" style="margin-top:12px">
-            <div class="field"><label>Name</label><input type="text" id="tName" placeholder="me"></div>
-            <div class="field"><label>Token (use in prompts)</label><input type="text" id="tToken" value="ohwx person"></div>
-          </div>
-          <details>
-            <summary>Training settings</summary>
-            <div class="grid3">
-              <div class="field"><label>Steps</label><input type="number" id="tSteps" value="800"></div>
-              <div class="field"><label>Rank</label><input type="number" id="tRank" value="16"></div>
-              <div class="field"><label>Learning rate</label><input type="number" id="tLr" value="0.0001" step="0.00001"></div>
-              <div class="field"><label>Batch</label><input type="number" id="tBatch" value="2"></div>
-              <div class="field"><label>Resolution</label><input type="number" id="tRes" value="512" step="64"></div>
-              <div class="field"><label>Min face px</label><input type="number" id="tMinFace" value="48"></div>
-            </div>
-            <div class="hint">800 steps ≈ 7 min on an RTX 3060 at 512 px. More photos beats more steps; 1200–1500 steps once you have 10+ clear faces.</div>
-          </details>
-          <div class="row" style="margin-top:8px">
-            <button id="trainBtn">Train</button>
-            <button class="danger" id="trainStop" hidden>Stop</button>
-            <span class="status" id="trainStatus"></span>
-          </div>
-          <div class="log" id="trainLog" style="margin-top:12px" hidden></div>
-        </div>
-
-        <div class="card">
-          <h3>Render with a LoRA</h3>
-          <div class="grid2">
-            <div class="field"><label>LoRA</label><select id="sName"></select></div>
-            <div class="field"><label>Images</label><input type="number" id="sNum" value="2" min="1" max="8"></div>
-          </div>
-          <div class="field"><label>Prompt (blank = 4 built-in prompts)</label><input type="text" id="sPrompt" placeholder="photo of ohwx person at a cafe, natural light"></div>
-          <div class="grid2">
-            <div class="field"><label>LoRA scale</label><input type="number" id="sScale" value="0.9" step="0.1"></div>
-            <div class="field"><label>Seed</label><input type="number" id="sSeed" placeholder="random"></div>
-          </div>
-          <div class="row"><button id="sampleBtn">Render</button><span class="status" id="sampleStatus"></span></div>
-          <div class="gallery" id="sampleGallery" style="margin-top:12px"></div>
-        </div>
-
-        <div class="card">
-          <h3>Trained LoRAs <button class="ghost small" id="refreshLoras">⟳</button></h3>
-          <div id="loraList" class="hint">none yet</div>
-        </div>
+  <aside class="panel">
+    <div class="scroll">
+      <div>
+        <h2>What should they wear?</h2>
       </div>
+
+      <div id="singleBox">
+        <textarea id="prompt" placeholder="e.g. a red satin evening dress" aria-label="Describe the outfit"></textarea>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div id="splitBox" hidden>
+        <div class="lbl">Top</div><input type="text" id="upper" placeholder="a white linen shirt">
+        <div class="lbl" style="margin-top:10px">Bottom</div><input type="text" id="lower" placeholder="beige chinos">
+      </div>
+
+      <div>
+        <div class="lbl">Change <button class="linkbtn" id="splitToggle">Describe top &amp; bottom separately</button></div>
+        <div class="seg" id="partsSeg"><button data-v="full" class="on">Whole outfit</button><button data-v="upper">Top</button><button data-v="lower">Bottom</button></div>
+      </div>
+
+      <div>
+        <div class="lbl">Variations</div>
+        <div class="seg" id="numSeg"><button data-v="1">1</button><button data-v="2" class="on">2</button><button data-v="3">3</button><button data-v="4">4</button></div>
+      </div>
+
+      <div>
+        <div class="go">
+          <button class="primary" id="goBtn"><div class="fill" id="goFill"></div><span id="goText">Generate</span></button>
+          <button class="stop" id="stopBtn" hidden>Stop</button>
+        </div>
+        <div class="row" style="margin-top:9px; justify-content:space-between">
+          <button class="linkbtn" id="maskBtn" style="flex:none">Preview what gets repainted</button>
+          <span class="sub" id="hint" style="flex:none; text-align:right">Ctrl + Enter</span>
+        </div>
+        <div class="err" id="err" hidden></div>
+      </div>
+
+      <details class="more">
+        <summary>More options</summary>
+        <div class="opts">
+          <label class="sw"><input type="checkbox" id="coverArms"> Repaint bare arms <span class="sub">(automatic for jackets, shirts, tees&hellip;)</span></label>
+          <label class="sw"><input type="checkbox" id="coverLegs"> Repaint bare legs <span class="sub">(automatic for jeans, trousers, maxi&hellip;)</span></label>
+          <label class="sw"><input type="checkbox" id="noNeckline"> Keep the current neckline</label>
+          <label class="sw"><input type="checkbox" id="noExpose"> Keep the chest above the neckline
+            <span class="sub">(automatic for bikinis, tube tops, halters&hellip;)</span></label>
+
+          <div>
+            <div class="lbl">Accuracy</div>
+            <div class="seg" id="parserSeg"><button data-v="segformer" class="on">Standard</button><button data-v="sapiens" id="sapiensBtn">Best on close-ups</button></div>
+            <div class="note">"Best" uses Meta Sapiens — non-commercial use only.</div>
+          </div>
+
+          <div>
+            <div class="lbl">Engine</div>
+            <div class="seg" id="engineSeg"><button data-v="" class="on">Auto</button><button data-v="flux" id="fluxBtn">FLUX</button><button data-v="sd15">SD 1.5</button></div>
+          </div>
+
+          <div id="refBox">
+            <div class="lbl">Garment photo <span class="sub">FLUX only</span></div>
+            <label class="miniDrop" id="refDrop"><img id="refImg" hidden><span id="refText">Use a photo of the garment instead of words</span>
+              <input type="file" id="refInput" accept="image/*"></label>
+          </div>
+
+          <div class="grid2">
+            <div><div class="lbl">Seed <button class="linkbtn" id="seedRand" title="random">🎲</button></div><input type="number" id="seed" placeholder="random"></div>
+            <div><div class="lbl">Steps</div><input type="number" id="steps" placeholder="auto"></div>
+            <div><div class="lbl">Guidance</div><input type="number" id="guidance" step="0.5" placeholder="auto"></div>
+            <div><div class="lbl">Mask grow (px)</div><input type="number" id="grow" value="20"></div>
+          </div>
+
+          <div class="grid2">
+            <div><div class="lbl">Identity LoRA</div><select id="lora"><option value="">None</option></select></div>
+            <div><div class="lbl">LoRA strength</div><input type="number" id="loraScale" step="0.1" placeholder="0.8"></div>
+          </div>
+
+          <div>
+            <div class="lbl">Run on</div>
+            <div class="seg" id="deviceSeg"><button data-v="auto" class="on">Auto</button><button data-v="cuda">GPU</button><button data-v="cpu">CPU</button></div>
+            <div class="note">Auto uses the GPU unless other programs fill it past 80%.</div>
+          </div>
+        </div>
+      </details>
+
+      <details class="more" id="logBox">
+        <summary>Details</summary>
+        <div class="log" id="log">No run yet.</div>
+      </details>
+    </div>
+  </aside>
+</main>
+
+<!-- ================================================================ IDENTITY -->
+<main class="view" id="identity" hidden>
+  <div class="wrap">
+    <div class="card">
+      <div class="step">Step 1</div>
+      <h2>Photos of one person</h2>
+      <div class="sub">5–15 clear photos, different angles and lighting. Your own photos, or someone who agreed.</div>
+      <label class="tdrop" id="tDrop"><div id="tText">Drop photos here, or click to choose</div><input type="file" id="tInput" accept="image/*" multiple></label>
+      <div class="tgrid" id="tGrid"></div>
+    </div>
+    <div class="card">
+      <div class="step">Step 2</div>
+      <h2>Train</h2>
+      <div class="grid2">
+        <div><div class="lbl">Name</div><input type="text" id="tName" placeholder="me"></div>
+        <div><div class="lbl">Trigger word</div><input type="text" id="tToken" value="ohwx person"></div>
+      </div>
+      <details class="more"><summary>Training settings</summary>
+        <div class="opts"><div class="grid2">
+          <div><div class="lbl">Steps</div><input type="number" id="tSteps" value="800"></div>
+          <div><div class="lbl">Rank</div><input type="number" id="tRank" value="16"></div>
+          <div><div class="lbl">Learning rate</div><input type="number" id="tLr" value="0.0001" step="0.00001"></div>
+          <div><div class="lbl">Resolution</div><input type="number" id="tRes" value="512" step="64"></div>
+        </div></div>
+      </details>
+      <div class="go"><button class="primary" id="tBtn"><div class="fill" id="tFill"></div><span id="tBtnText">Train</span></button>
+        <button class="stop" id="tStop" hidden>Stop</button></div>
+      <div class="err" id="tErr" hidden></div>
+      <div class="log" id="tLog" hidden></div>
+    </div>
+    <div class="card">
+      <h2>Trained</h2>
+      <div id="loras" class="sub">Nothing trained yet.</div>
     </div>
   </div>
+</main>
 
 <script>
 const $ = id => document.getElementById(id);
-const api = async (path, opts={}) => {
+async function api(path, opts = {}) {
   const r = await fetch('/api/image' + path, opts);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.detail || r.statusText);
   return j;
-};
-const num = id => { const v = $(id).value; return v === '' ? null : Number(v); };
-const str = id => $(id).value.trim() || null;
-
-// ---------------------------------------------------------------- uploads
-async function uploadOne(file) {
-  const fd = new FormData(); fd.append('file', file);
-  return api('/upload', { method: 'POST', body: fd });
 }
-function wireDrop(dropId, inputId, onFiles) {
-  const drop = $(dropId), input = $(inputId);
-  ['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
-  ['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
-  drop.addEventListener('drop', ev => onFiles([...ev.dataTransfer.files]));
-  input.addEventListener('change', () => onFiles([...input.files]));
-}
-let photo = null, ref = null, trainFolder = null;
-wireDrop('photoDrop', 'photoFile', async files => {
-  if (!files[0]) return;
-  $('photoLabel').textContent = 'uploading…';
-  photo = await uploadOne(files[0]);
-  $('photoPrev').src = photo.url; $('photoPrev').hidden = false; $('photoLabel').textContent = photo.name;
-});
-wireDrop('refDrop', 'refFile', async files => {
-  if (!files[0]) return;
-  ref = await uploadOne(files[0]);
-  $('refPrev').src = ref.url; $('refPrev').hidden = false; $('refLabel').textContent = ref.name;
-});
-wireDrop('trainDrop', 'trainFiles', async files => {
-  files = files.filter(f => f.type.startsWith('image/'));
-  if (!files.length) return;
-  $('trainLabel').textContent = `uploading ${files.length} photos…`;
-  const fd = new FormData(); files.forEach(f => fd.append('files', f));
-  const r = await api('/upload_many', { method: 'POST', body: fd });
-  trainFolder = r.folder;
-  $('trainLabel').textContent = `${r.count} photos ready`;
-  $('trainThumbs').innerHTML = r.urls.map(u => `<a href="${u}" target="_blank"><img src="${u}"></a>`).join('');
-});
-
-// ---------------------------------------------------------------- outfit mode tabs
-let mode = 'single';
-document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
-  mode = b.dataset.mode;
-  $('modeSingle').hidden = mode !== 'single'; $('modeSplit').hidden = mode !== 'split'; $('modeRef').hidden = mode !== 'ref';
-});
-
-// ---------------------------------------------------------------- jobs
-function gallery(el, urls, caps) {
-  el.innerHTML = urls.map((u, i) => `<a href="${u}" target="_blank"><img src="${u}" loading="lazy"><div class="cap">${(caps && caps[i]) || u.split('/').pop()}</div></a>`).join('');
-}
-function statusHtml(j) {
-  const cls = j.status === 'running' ? 'running' : (j.status === 'done' ? 'done' : 'error');
-  return `<span class="${cls}">${j.status}</span> · ${j.elapsed}s`;
-}
-async function poll(id, { onUpdate, onDone }) {
-  for (;;) {
-    let j;
-    try { j = await api('/jobs/' + id); } catch (e) { onUpdate({ status: 'error', log: [e.message], elapsed: 0, outputs: [] }); return; }
-    onUpdate(j);
-    if (j.status !== 'running' && j.status !== 'stopping') { onDone && onDone(j); return; }
-    await new Promise(r => setTimeout(r, 1500));
-  }
-}
-let runJob = null;
-async function runClothes(maskOnly) {
-  if (!photo) { alert('Upload a photo first'); return; }
-  const body = {
-    image: photo.path, num: num('num') || 1, seed: num('seed'), engine: str('engine'),
-    steps: num('steps'), guidance: num('guidance'), res: num('res'), grow: num('grow') ?? 20,
-    hires: num('hires'), refine_strength: num('refine'), depth_scale: num('depthScale'), edge_scale: num('edgeScale'),
-    negative: str('negative'), lora: str('lora'), lora_scale: num('loraScale'),
-    cover_arms: $('coverArms').checked, cover_legs: $('coverLegs').checked, no_neckline: $('noNeckline').checked,
-    no_control: $('noControl').checked, sdxl: $('sdxl').checked, mask_only: !!maskOnly,
-  };
-  if (mode === 'single') { body.prompt = str('prompt'); body.parts = $('parts').value; }
-  else if (mode === 'split') { body.upper = str('upper'); body.lower = str('lower'); }
-  else { if (!ref) { alert('Upload a garment photo'); return; } body.ref = ref.path; body.prompt = str('refPrompt') || 'the garment from the reference photo'; body.parts = $('refParts').value; body.engine = 'flux'; }
-  if (!(body.prompt || body.upper || body.lower)) { alert('Describe the outfit'); return; }
-  $('runBtn').disabled = $('maskBtn').disabled = true; $('stopBtn').hidden = false;
-  $('resultCard').hidden = false; $('gallery').innerHTML = ''; $('runLog').textContent = '';
-  try {
-    runJob = await api('/clothes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { $('runStatus').innerHTML = `<span class="error">${e.message}</span>`; resetRun(); return; }
-  $('resultMeta').textContent = body.prompt || `${body.upper || ''} | ${body.lower || ''}`;
-  poll(runJob.id, {
-    onUpdate: j => { $('runStatus').innerHTML = statusHtml(j); $('runLog').textContent = j.log.join('\n'); $('runLog').scrollTop = 1e9;
-      if (j.outputs.length) gallery($('gallery'), j.outputs); },
-    onDone: resetRun,
+const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const val = id => $(id).value.trim();
+const numOrNull = id => $(id).value === '' ? null : Number($(id).value);
+function seg(id, onChange) {
+  const el = $(id);
+  el.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b || b.disabled) return;
+    el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    onChange && onChange(b.dataset.v);
   });
+  return () => el.querySelector('button.on').dataset.v;
 }
-function resetRun() { $('runBtn').disabled = $('maskBtn').disabled = false; $('stopBtn').hidden = true; refreshInfo(); }
-$('runBtn').onclick = () => runClothes(false);
-$('maskBtn').onclick = () => runClothes(true);
-$('stopBtn').onclick = () => runJob && api(`/jobs/${runJob.id}/stop`, { method: 'POST' });
+function showErr(el, msg) { el.textContent = msg || ''; el.hidden = !msg; }
 
-// ---------------------------------------------------------------- training
-let trainJob = null;
-$('trainBtn').onclick = async () => {
-  if (!trainFolder) { alert('Upload the photos first'); return; }
-  const body = { folder: trainFolder, name: str('tName') || 'me', token: str('tToken') || 'ohwx person',
-    steps: num('tSteps'), rank: num('tRank'), lr: num('tLr'), batch: num('tBatch'), res: num('tRes'), min_face: num('tMinFace') };
-  $('trainBtn').disabled = true; $('trainStop').hidden = false; $('trainLog').hidden = false; $('trainLog').textContent = '';
-  try { trainJob = await api('/train', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
-  catch (e) { $('trainStatus').innerHTML = `<span class="error">${e.message}</span>`; $('trainBtn').disabled = false; $('trainStop').hidden = true; return; }
-  poll(trainJob.id, {
-    onUpdate: j => { $('trainStatus').innerHTML = statusHtml(j); $('trainLog').textContent = j.log.join('\n'); $('trainLog').scrollTop = 1e9; },
-    onDone: j => { $('trainBtn').disabled = false; $('trainStop').hidden = true; refreshInfo(); if (j.outputs.length) gallery($('sampleGallery'), j.outputs); },
-  });
-};
-$('trainStop').onclick = () => trainJob && api(`/jobs/${trainJob.id}/stop`, { method: 'POST' });
+// ---------------------------------------------------------------- tabs
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  $('outfit').hidden = b.dataset.view !== 'outfit'; $('identity').hidden = b.dataset.view !== 'identity';
+});
 
-$('sampleBtn').onclick = async () => {
-  const name = $('sName').value; if (!name) { alert('Train a LoRA first'); return; }
-  const body = { name, prompt: str('sPrompt'), num: num('sNum') || 1, lora_scale: num('sScale') ?? 0.9, seed: num('sSeed') };
-  $('sampleBtn').disabled = true; $('sampleGallery').innerHTML = '';
-  let j;
-  try { j = await api('/sample', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
-  catch (e) { $('sampleStatus').innerHTML = `<span class="error">${e.message}</span>`; $('sampleBtn').disabled = false; return; }
-  const before = new Set((await api('/info')).loras.find(l => l.name === name)?.samples || []);
-  poll(j.id, {
-    onUpdate: x => { $('sampleStatus').innerHTML = statusHtml(x); },
-    onDone: x => { $('sampleBtn').disabled = false; gallery($('sampleGallery'), x.outputs.filter(u => !before.has(u)).concat(x.outputs.filter(u => before.has(u)))); refreshInfo(); },
-  });
-};
-
-// ---------------------------------------------------------------- info
+// ---------------------------------------------------------------- status: GPU + resident models
+let info = null;
 async function refreshInfo() {
-  let info; try { info = await api('/info'); } catch (e) { $('engBadge').textContent = 'server unreachable'; return; }
-  const e = info.engines;
-  $('engBadge').innerHTML = `flux <span class="pill ${e.flux ? 'ok' : ''}">${e.flux ? 'ready' : 'missing'}</span> sd15 <span class="pill ${e.sd15 ? 'ok' : ''}">${e.sd15 ? 'ready' : 'missing'}</span>`;
-  $('busyDot').className = 'dot ' + (info.busy ? 'off' : 'on'); $('busyText').textContent = info.busy ? `busy: ${info.busy.kind}` : 'idle';
-  const keep = $('lora').value, keepS = $('sName').value;
-  $('lora').innerHTML = '<option value="">none</option>' + info.loras.map(l => `<option value="${l.name}">${l.name} (${l.token})</option>`).join('');
-  $('sName').innerHTML = info.loras.map(l => `<option value="${l.name}">${l.name}</option>`).join('');
-  $('lora').value = keep; if (keepS) $('sName').value = keepS;
-  $('loraList').innerHTML = info.loras.length ? info.loras.map(l => `
-    <div class="lora"><div class="row" style="justify-content:space-between"><span class="name">${l.name}</span><span class="pill">${l.token}</span><span class="hint">${l.crops.length} crops · ${l.samples.length} samples</span></div>
-      <div class="thumbs">${l.samples.slice(-6).map(u => `<a href="${u}" target="_blank"><img src="${u}"></a>`).join('')}</div></div>`).join('') : 'none yet — train one on the left';
+  try { info = await api('/info'); } catch { $('gpuText').textContent = 'offline'; return; }
+  const g = info.gpu;
+  if (g) {
+    const f = g.used_gb / g.total_gb;
+    $('gpuName').textContent = g.name.replace(/NVIDIA |GeForce /g, '');
+    $('gpuText').textContent = `${g.used_gb} / ${g.total_gb} GB`;
+    $('gpuBar').firstElementChild.style.width = (f * 100).toFixed(0) + '%';
+    $('gpuBar').className = 'bar' + (f > .9 ? ' full' : f > .8 ? ' hot' : '');
+  } else { $('gpuName').textContent = 'No GPU'; $('gpuText').textContent = 'CPU only'; }
+  const m = info.models, n = (m.loaded || []).length;
+  $('modelsPill').classList.toggle('live', n > 0);
+  $('modelsText').textContent = n ? `${n} model${n > 1 ? 's' : ''} loaded${m.reserved_gb ? ` · ${m.reserved_gb} GB` : ''}` : (m.running ? 'Ready' : 'Models not loaded');
+  $('modelsPill').title = n ? 'Loaded: ' + m.loaded.map(x => x.split(':')[0]).join(', ') + (m.note ? `\n${m.note}` : '') : 'Models load on the first run and then stay loaded';
+  $('unloadBtn').disabled = !m.running || !!running;
+  $('fluxBtn').disabled = !info.engines.flux; $('fluxBtn').title = info.engines.flux ? '' : 'FLUX is not downloaded';
+  $('sapiensBtn').disabled = !info.engines.sapiens; $('sapiensBtn').title = info.engines.sapiens ? '' : 'Sapiens is not downloaded';
+  $('refBox').style.opacity = info.engines.flux ? 1 : .45;
+  const keep = $('lora').value;
+  $('lora').innerHTML = '<option value="">None</option>' + info.loras.map(l => `<option value="${l.name}">${l.name}</option>`).join('');
+  $('lora').value = keep;
+  renderLoras(info.loras);
 }
-$('refreshLoras').onclick = refreshInfo;
+$('unloadBtn').onclick = async () => {
+  try { await post('/models/unload', {}); } catch (e) { alert(e.message); }
+  refreshInfo();
+};
+
+// ---------------------------------------------------------------- photo + viewer
+let photo = null, refPhoto = null, results = [], selected = null, maskUrl = null;
+function wireDrop(zone, input, onFiles) {
+  ['dragenter', 'dragover'].forEach(t => zone.addEventListener(t, e => { e.preventDefault(); zone.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(t => zone.addEventListener(t, e => { e.preventDefault(); zone.classList.remove('over'); }));
+  zone.addEventListener('drop', e => onFiles([...e.dataTransfer.files]));
+  input.addEventListener('change', () => { onFiles([...input.files]); input.value = ''; });
+}
+async function upload(file) { const fd = new FormData(); fd.append('file', file); return api('/upload', { method: 'POST', body: fd }); }
+async function setPhoto(files) {
+  const f = files.find(x => x.type.startsWith('image/')); if (!f) return;
+  showErr($('err'));
+  $('drop').querySelector('.big').textContent = 'Uploading…';
+  try { photo = await upload(f); } catch (e) { showErr($('err'), e.message); return; }
+  finally { $('drop').querySelector('.big').textContent = 'Drop a photo'; }
+  results = []; selected = null; maskUrl = null; $('maskTool').classList.remove('on'); showPhoto();
+}
+wireDrop($('drop'), $('photoInput'), setPhoto);
+// dropping a new photo straight onto the current one replaces it
+$('stage').addEventListener('dragover', e => e.preventDefault());
+$('stage').addEventListener('drop', e => { if (!$('viewer').hidden) { e.preventDefault(); setPhoto([...e.dataTransfer.files]); } });
+$('newPhoto').onclick = () => $('photoInput').click();
+
+function showPhoto() {
+  $('drop').hidden = !!photo; $('viewer').hidden = !photo;
+  if (!photo) return;
+  $('imgBefore').src = photo.url;
+  renderViewer(); renderStrip();
+}
+function renderViewer() {
+  const r = selected;
+  $('imgAfter').hidden = !r; $('handle').hidden = !r; $('tagR').hidden = !r; $('dlTool').hidden = !r;
+  $('tagL').textContent = r ? 'Original' : 'Original — describe an outfit and press Generate';
+  if (r) { $('imgAfter').src = r.url; $('dlTool').href = r.url; $('dlTool').download = r.url.split('/').pop(); }
+  const m = r ? r.mask : maskUrl;
+  $('maskTool').hidden = !m;
+  $('imgMask').hidden = !(m && $('maskTool').classList.contains('on'));
+  if (m) $('imgMask').src = m;
+  $('viewer').style.setProperty('--cut', r ? (cut + '%') : '0%');
+}
+function renderStrip() {
+  const pend = running ? Math.max(0, (running.num || 1) - running.seen) : 0;
+  $('strip').hidden = !photo || (!results.length && !pend);
+  $('strip').innerHTML =
+    `<button class="thumb ${selected ? '' : 'sel'}" data-i="-1"><img src="${photo.url}"><span class="lab">Original</span></button>` +
+    Array.from({ length: pend }, () => `<div class="thumb pending"><div class="spin"></div></div>`).join('') +
+    results.map((r, i) => `<button class="thumb ${selected === r ? 'sel' : ''}" data-i="${i}" title="${r.prompt}"><img src="${r.url}" loading="lazy"></button>`).join('');
+}
+$('strip').addEventListener('click', e => {
+  const b = e.target.closest('button.thumb'); if (!b) return;
+  const i = Number(b.dataset.i); selected = i < 0 ? null : results[i]; renderViewer(); renderStrip();
+});
+$('maskTool').onclick = () => { $('maskTool').classList.toggle('on'); renderViewer(); };
+
+// before/after slider
+let cut = 50, dragging = false;
+function setCut(clientX) {
+  const box = $('viewer').getBoundingClientRect();
+  cut = Math.min(100, Math.max(0, (clientX - box.left) / box.width * 100));
+  $('viewer').style.setProperty('--cut', cut + '%');
+}
+$('viewer').addEventListener('pointerdown', e => { if (!selected || e.target.closest('.tools')) return; dragging = true; $('viewer').setPointerCapture(e.pointerId); setCut(e.clientX); });
+$('viewer').addEventListener('pointermove', e => dragging && setCut(e.clientX));
+$('viewer').addEventListener('pointerup', () => dragging = false);
+
+// ---------------------------------------------------------------- outfit controls
+const CHIPS = ['a red satin evening dress', 'a white linen shirt and blue jeans', 'a black leather jacket', 'a floral summer dress',
+  'a navy blue suit', 'a cream knit sweater'];
+$('chips').innerHTML = CHIPS.map(c => `<button class="chip">${c.replace(/^an? /, '')}</button>`).join('');
+$('chips').addEventListener('click', e => { const b = e.target.closest('.chip'); if (b) { $('prompt').value = CHIPS[[...$('chips').children].indexOf(b)]; $('prompt').focus(); } });
+const parts = seg('partsSeg'), num = seg('numSeg'), parser = seg('parserSeg'), engine = seg('engineSeg'), device = seg('deviceSeg');
+let split = false;
+$('splitToggle').onclick = () => {
+  split = !split; $('singleBox').hidden = split; $('splitBox').hidden = !split; $('partsSeg').parentElement.querySelector('.seg').hidden = split;
+  $('splitToggle').textContent = split ? 'Use one description' : 'Describe top & bottom separately';
+};
+$('seedRand').onclick = () => { $('seed').value = Math.floor(Math.random() * 2 ** 31); };
+wireDrop($('refDrop'), $('refInput'), async files => {
+  const f = files[0]; if (!f) return;
+  try { refPhoto = await upload(f); $('refImg').src = refPhoto.url; $('refImg').hidden = false; $('refText').textContent = 'Garment photo set — click to change'; }
+  catch (e) { showErr($('err'), e.message); }
+});
+
+// ---------------------------------------------------------------- run + progress
+let running = null;   // {id, num, maskOnly, seen, best}
+function progressOf(j) {
+  const lines = j.log || [], N = running.num || 1;
+  let p = 1, label = 'Starting…', done = 0, bar = 0, gen = false;
+  for (const l of lines) {
+    if (/device for masks/.test(l)) { p = 3; label = 'Preparing…'; }
+    else if (/refining at full resolution|segmented \(fast\)/.test(l)) { p = 6; label = 'Finding the clothes…'; }
+    else if (/^segmented/.test(l)) { p = 22; label = running.maskOnly ? 'Mask ready' : 'Mask ready'; }
+    else if (/device for generation/.test(l)) { p = 25; gen = true; label = 'Loading the image model…'; }
+    const m = /^\[(\d+)\/(\d+)\]/.exec(l); if (m) done = Number(m[1]);
+    const b = /(\d+)%\|/.exec(l); if (b && gen) bar = Number(b[1]);
+  }
+  if (gen && bar) { label = `Painting ${Math.min(done + 1, N)} of ${N}…`; }
+  if (gen) p = Math.max(p, 25 + 75 * (done + (done < N ? bar / 100 * .95 : 0)) / N);
+  running.best = Math.max(running.best || 0, p);
+  return { p: running.best, label };
+}
+async function generate(maskOnly) {
+  showErr($('err'));
+  if (!photo) { showErr($('err'), 'Add a photo first.'); return; }
+  const body = {
+    image: photo.path, num: maskOnly ? 1 : Number(num()), parts: parts(), parser: parser(), engine: engine() || null, device: device(),
+    seed: numOrNull('seed'), steps: numOrNull('steps'), guidance: numOrNull('guidance'), grow: numOrNull('grow') ?? 20,
+    lora: val('lora') || null, lora_scale: numOrNull('loraScale'),
+    cover_arms: $('coverArms').checked, cover_legs: $('coverLegs').checked, no_neckline: $('noNeckline').checked,
+    expose: $('noExpose').checked ? false : null, mask_only: !!maskOnly,
+  };
+  if (split) { body.upper = val('upper') || null; body.lower = val('lower') || null; }
+  else body.prompt = val('prompt') || (refPhoto ? 'the garment from the reference photo' : '');
+  if (refPhoto && info?.engines.flux) { body.ref = refPhoto.path; body.engine = 'flux'; }
+  if (!(body.prompt || body.upper || body.lower)) { showErr($('err'), 'Describe the outfit first.'); $('prompt').focus(); return; }
+  let job;
+  try { job = await post('/clothes', body); } catch (e) { showErr($('err'), e.message); return; }
+  const prompt = body.prompt || [body.upper, body.lower].filter(Boolean).join(' + ');
+  running = { id: job.id, num: body.num, maskOnly: !!maskOnly, seen: 0, prompt, best: 0 };
+  setRunning(true); renderStrip(); poll();
+}
+function setRunning(on) {
+  $('goBtn').disabled = on; $('stopBtn').hidden = !on; $('maskBtn').disabled = on; $('unloadBtn').disabled = on || !info?.models.running;
+  if (!on) { $('goFill').style.width = '0'; $('goText').textContent = 'Generate'; }
+}
+async function poll() {
+  if (!running) return;
+  let j;
+  try { j = await api('/jobs/' + running.id); } catch (e) { showErr($('err'), e.message); running = null; setRunning(false); return; }
+  const { p, label } = progressOf(j);
+  $('goFill').style.width = p.toFixed(1) + '%';
+  $('goText').textContent = j.status === 'stopping' ? 'Stopping…' : `${label}  ${Math.round(p)}%`;
+  $('log').textContent = (j.log || []).join('\n') || '…'; $('log').scrollTop = 1e9;
+  const outs = j.outputs || [];
+  const mask = outs.find(u => /_mask_full\.png$/.test(u)) || outs.find(u => /_mask\.png$/.test(u)) || null;
+  const fresh = outs.filter(u => /_\d+_seed\d+\.png$/.test(u) && !results.some(r => r.url === u));
+  for (const u of fresh) results.unshift({ url: u, mask, prompt: running.prompt });
+  if (fresh.length) { running.seen += fresh.length; selected = results[0]; renderViewer(); }
+  if (running.maskOnly && mask) { maskUrl = mask; $('maskTool').classList.add('on'); renderViewer(); }
+  renderStrip();
+  if (['running', 'stopping'].includes(j.status)) { setTimeout(poll, 900); return; }
+  if (j.status === 'error') showErr($('err'), (j.log || []).slice(-1)[0] || 'Something went wrong — see Details.');
+  running = null; setRunning(false); renderStrip(); refreshInfo();
+}
+$('goBtn').onclick = () => generate(false);
+$('maskBtn').onclick = () => generate(true);
+$('stopBtn').onclick = () => running && post(`/jobs/${running.id}/stop`, {}).catch(() => {});
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !running && !$('outfit').hidden) generate(false); });
+
+// ---------------------------------------------------------------- identity
+let trainFolder = null, trainJob = null;
+wireDrop($('tDrop'), $('tInput'), async files => {
+  files = files.filter(f => f.type.startsWith('image/')); if (!files.length) return;
+  $('tText').textContent = `Uploading ${files.length} photos…`;
+  const fd = new FormData(); files.forEach(f => fd.append('files', f));
+  try {
+    const r = await api('/upload_many', { method: 'POST', body: fd });
+    trainFolder = r.folder; $('tText').textContent = `${r.count} photos ready — drop again to replace`;
+    $('tGrid').innerHTML = r.urls.map(u => `<img src="${u}">`).join('');
+  } catch (e) { $('tText').textContent = e.message; }
+});
+$('tBtn').onclick = async () => {
+  showErr($('tErr'));
+  if (!trainFolder) { showErr($('tErr'), 'Add the photos first.'); return; }
+  const body = { folder: trainFolder, name: val('tName') || 'me', token: val('tToken') || 'ohwx person',
+    steps: numOrNull('tSteps') || 800, rank: numOrNull('tRank') || 16, lr: numOrNull('tLr') || 1e-4, res: numOrNull('tRes') || 512 };
+  try { trainJob = await post('/train', body); } catch (e) { showErr($('tErr'), e.message); return; }
+  $('tBtn').disabled = true; $('tStop').hidden = false; $('tLog').hidden = false; pollTrain(body.steps);
+};
+async function pollTrain(steps) {
+  let j; try { j = await api('/jobs/' + trainJob.id); } catch (e) { showErr($('tErr'), e.message); return; }
+  const last = [...(j.log || [])].reverse().find(l => /step\s*\d+/i.test(l)) || '';
+  const m = /step\s*(\d+)/i.exec(last); const p = m ? Math.min(100, Number(m[1]) / steps * 100) : 2;
+  $('tFill').style.width = p + '%'; $('tBtnText').textContent = j.status === 'running' ? `Training… ${Math.round(p)}%` : 'Train';
+  $('tLog').textContent = (j.log || []).join('\n'); $('tLog').scrollTop = 1e9;
+  if (['running', 'stopping'].includes(j.status)) { setTimeout(() => pollTrain(steps), 1500); return; }
+  if (j.status === 'error') showErr($('tErr'), 'Training failed — see the log above.');
+  $('tBtn').disabled = false; $('tStop').hidden = true; $('tFill').style.width = '0'; refreshInfo();
+}
+$('tStop').onclick = () => trainJob && post(`/jobs/${trainJob.id}/stop`, {}).catch(() => {});
+function renderLoras(list) {
+  if (!list.length) { $('loras').innerHTML = 'Nothing trained yet.'; return; }
+  $('loras').className = '';
+  $('loras').innerHTML = list.map(l => `
+    <div class="lora">
+      <div><b>${l.name}</b> <span class="sub">· trigger “${l.token}”</span></div>
+      <button class="secondary" data-render="${l.name}">Render samples</button>
+      <div class="thumbs">${l.samples.slice(-8).map(u => `<a href="${u}" target="_blank"><img src="${u}" loading="lazy"></a>`).join('')}</div>
+    </div>`).join('');
+}
+$('loras').addEventListener('click', async e => {
+  const b = e.target.closest('[data-render]'); if (!b) return;
+  b.disabled = true; b.textContent = 'Rendering…';
+  try {
+    const j = await post('/sample', { name: b.dataset.render, num: 2 });
+    const wait = async () => { const x = await api('/jobs/' + j.id); if (['running', 'stopping'].includes(x.status)) return setTimeout(wait, 1500); refreshInfo(); };
+    wait();
+  } catch (err) { b.textContent = err.message; }
+});
+
 refreshInfo();
-setInterval(refreshInfo, 15000);
+setInterval(refreshInfo, 4000);
 </script>
 </body>
 </html>
