@@ -31,6 +31,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+import model_cache
+
 ROOT = Path(__file__).resolve().parent.parent
 CKPT = ROOT / "checkpoints"
 SAM_MODEL = CKPT / "sam2.1-large"
@@ -72,8 +74,9 @@ def segformer_probs(img: Image.Image, seg_model: str, device: str, side: int = 5
     ox, oy = (s - w) // 2, (s - h) // 2
     pad.paste(img, (ox, oy))
 
-    proc = AutoImageProcessor.from_pretrained(seg_model)
-    model = AutoModelForSemanticSegmentation.from_pretrained(seg_model).to(device).eval()
+    proc, model = model_cache.get(("segformer", str(seg_model), device), lambda: (
+        AutoImageProcessor.from_pretrained(seg_model),
+        AutoModelForSemanticSegmentation.from_pretrained(seg_model).to(device).eval()))
     with torch.no_grad():
         inputs = proc(images=pad.resize((side, side), Image.BICUBIC), return_tensors="pt",
                       do_resize=False).to(device)
@@ -328,6 +331,62 @@ def remove_specks(labels: np.ndarray, min_px: int) -> np.ndarray:
 
 CLOTH_IDS = (4, 5, 6, 7, 17)          # upper_clothes, skirt, pants, dress, scarf
 SKIN_IDS = (11, 12, 13, 14, 15, SKIN)   # face, legs, arms, neck/chest skin
+UPPER_LABELS = (4, 7, 17)               # upper_clothes, dress, scarf - what a top can be
+LOWER_LABELS = (5, 6)                   # skirt, pants
+
+
+def split_top_from_bottom(coarse: np.ndarray, min_upper: float = 0.004,
+                          min_lower: float = 0.01, band: int = 3) -> np.ndarray:
+    """A cloth mask that keeps a top and the skirt under it as two blobs, not one.
+
+    The merge in clean_semantics() takes the majority label of each connected cloth region, which
+    is right for one garment (a bikini top the parser split across two labels) and wrong for two
+    garments that touch. A crop top and the skirt below it are one region - the hem and the
+    waistband abut, and an arm often covers the midriff between them - so the skirt's majority
+    swallows the top and `--parts upper` then finds no top to replace.
+
+    The hem is found per column (where the two are cleanly ordered, all upper above all lower)
+    and the cut is then carried across the columns that both labels share. Cutting only the
+    columns where the classes meet is not enough: the top is wider than the meeting line on a
+    leaning body, so a few untouched columns still join the two pieces. Nothing is removed from
+    the labels themselves - the top keeps every pixel, it just stops being glued to the skirt."""
+    up = np.isin(coarse, [4])            # only upper_clothes: 'dress' is already both halves
+    low = np.isin(coarse, list(LOWER_LABELS))
+    if not up.any() or not low.any():
+        return np.isin(coarse, list(CLOTH_IDS))
+    total = coarse.size
+    if up.sum() < min_upper * total or low.sum() < min_lower * total:
+        return np.isin(coarse, list(CLOTH_IDS))
+
+    H, W = coarse.shape
+    out = np.isin(coarse, list(CLOTH_IDS)).copy()
+    n_blobs, blob = cv2.connectedComponents(out.astype(np.uint8))
+
+    for c in range(1, n_blobs):
+        piece = blob == c
+        if not (piece & up).any() or not (piece & low).any():
+            continue                                    # one garment, or two that already split
+        ys = np.flatnonzero(piece.any(1))
+        xs = np.flatnonzero(piece.any(0))
+        # the hem, found per column inside this blob
+        cuts = []
+        for x in range(int(xs.min()), int(xs.max()) + 1):
+            cu = np.flatnonzero(piece[:, x] & up[:, x])
+            cl = np.flatnonzero(piece[:, x] & low[:, x])
+            if len(cu) < 5 or len(cl) < 5 or cu.max() > cl.min():
+                continue                                # a strap or a fold, not a hem
+            cut = (int(cu.max()) + int(cl.min())) // 2
+            if cut < band or cut + band >= H:
+                continue
+            if up[cut - band:cut, x].mean() > 0.5 and low[cut:cut + band, x].mean() > 0.5:
+                cuts.append(cut)
+        if len(cuts) < 8:
+            continue                                    # too few to be a hem, not a coincidence
+        # one line across the blob: a real hem is level, and a staircase of per-column cuts
+        # would not separate the pieces where the body is leaning
+        hem = int(np.median(cuts))
+        out[max(0, hem - band):hem + band, int(xs.min()):int(xs.max()) + 1] = False
+    return out
 
 
 def clean_semantics(coarse: np.ndarray, face_oval: np.ndarray | None, legs_visible: bool,
@@ -344,7 +403,12 @@ def clean_semantics(coarse: np.ndarray, face_oval: np.ndarray | None, legs_visib
 
     # 1. One garment, one label: touching cloth pieces take the majority label. (SegFormer
     #    only - Sapiens tells a top from trousers reliably, and those do touch at the waist.)
-    n, comp = cv2.connectedComponents(np.isin(out, CLOTH_IDS).astype(np.uint8))
+    #    A top and the skirt below it are cut apart first, or the majority label of the skirt
+    #    swallows the top and --parts upper finds nothing left to replace.
+    cloth = np.isin(out, CLOTH_IDS)
+    if merge_garments:
+        cloth = split_top_from_bottom(out)
+    n, comp = cv2.connectedComponents(cloth.astype(np.uint8))
     for c in range(1, n if merge_garments else 1):
         piece = comp == c
         vals = out[piece]
@@ -417,7 +481,8 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
     W, H = photo.size
     coarse = probs.argmax(0).astype(np.uint8)
     t0 = time.time()
-    sam = Sam(device)
+    sam = model_cache.get(("sam2.1", device), lambda: Sam(device))
+    sam.calls = 0
     log(f"  SAM 2.1 loaded ({time.time() - t0:.1f}s)")
 
     # How far SAM may move a boundary beyond the coarse region (it is fixing 5-px blocks and
@@ -454,6 +519,7 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
             m[y0:y1, x0:x1] = sub_coarse == other
             if m.sum() > 0.01 * sub_ref.size:
                 neg += interior_points(m, 1)
+        model_cache.check_cancel()
         lg = sam.segment(photo, cb, pos, neg[:6], ref=sub_ref)
         hard = np.zeros((H, W), bool)
         hard[y0:y1, x0:x1] = lg > 0
@@ -538,8 +604,8 @@ def refine(photo: Image.Image, probs: np.ndarray, face_oval: np.ndarray | None,
         labels[piece & ~np.isin(labels, (14, 15))] = arm
     log(f"  edge snapping ({time.time() - t:.1f}s), {sam.calls} SAM passes")
     calls = sam.calls
-    del sam                      # free the GPU for whatever runs next (diffusion needs it all)
-    if device == "cuda":
+    del sam                      # outside the worker this frees the GPU for diffusion
+    if device == "cuda" and not model_cache.KEEP:
         torch.cuda.empty_cache()
     return {"labels": labels, "sam_labels": sam_labels, "hands": hands_m,
             "person": labels > 0, "sam_calls": calls}
