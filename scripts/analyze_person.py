@@ -51,6 +51,9 @@ import torch
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from devices import muted, pick_device, quiet  # noqa: E402
+
+quiet()
 from change_clothes import (  # noqa: E402  (shared label map and model helpers)
     CKPT, DEPTH_MODEL, HAND_MODEL, LABELS as SEG_LABELS, ROOT, SEG_MODEL, bbox, fit_image, hand_mask, segment,
 )
@@ -90,32 +93,112 @@ def mp_image(img: Image.Image):
     return mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(np.asarray(img)))
 
 
-def detect_face(img: Image.Image) -> dict | None:
-    """478-point face mesh, a jaw-bounded face mask, and a rough head turn."""
-    if not FACE_MODEL.exists():
-        return None
-    import cv2
+def _face_landmarker(min_conf: float):
     from mediapipe.tasks import python as mpp
     from mediapipe.tasks.python import vision
 
-    opts = vision.FaceLandmarkerOptions(base_options=mpp.BaseOptions(model_asset_path=str(FACE_MODEL)),
-                                        num_faces=1, output_facial_transformation_matrixes=True)
-    res = vision.FaceLandmarker.create_from_options(opts).detect(mp_image(img))
-    if not res.face_landmarks:
+    opts = vision.FaceLandmarkerOptions(
+        base_options=mpp.BaseOptions(model_asset_path=str(FACE_MODEL)), num_faces=1,
+        min_face_presence_confidence=min_conf, min_tracking_confidence=min_conf,
+        output_facial_transformation_matrixes=True)
+    return vision.FaceLandmarker.create_from_options(opts)
+
+
+def head_box(img: Image.Image, pose: dict | None) -> tuple[tuple[int, int, int, int], float] | None:
+    """A square around the head taken from the POSE joints, plus the head tilt, or None.
+
+    The face landmarker's detector wants a frontal, upright, reasonably large face. On a tilted
+    portrait, or one where the head is small in the frame, it returns nothing - which is most of
+    a travel/pose dataset. The pose landmarker finds the same faces reliably, so we use its nose
+    and shoulders to aim a crop at the head and de-rotate it. `roll` is the shoulder-line tilt,
+    which matches the head's tilt whenever the person is standing or sitting upright."""
+    if pose is None:
         return None
+    p, ok = pose["points"], pose["visibility"] > 0.2
+    if not ok[0]:
+        return None
+    nose = p[0]
+    if ok[11] and ok[12]:
+        ls, rs = p[11], p[12]
+        span = float(np.linalg.norm(ls - rs))
+        # a shoulder span is ~3 head widths and the face is ~1; half the span leaves room for
+        # the hairline and the chin
+        side = span / 2.2 if span > 0 else max(img.size) / 8
+        roll = float(np.degrees(np.arctan2(rs[1] - ls[1], rs[0] - ls[0])))
+    else:
+        side, roll = max(img.size) / 8, 0.0
     w, h = img.size
-    pts = np.array([[l.x * w, l.y * h] for l in res.face_landmarks[0]], np.float32)
-    oval = np.zeros((h, w), np.uint8)
-    cv2.fillConvexPoly(oval, cv2.convexHull(pts.astype(np.int32)), 255)
-    face = {"points": pts, "oval": oval.astype(bool)}
-    if res.facial_transformation_matrixes:
-        r = np.asarray(res.facial_transformation_matrixes[0])[:3, :3]
-        face["yaw_deg"] = float(np.degrees(np.arctan2(-r[2, 0], np.hypot(r[2, 1], r[2, 2]))))
-        face["pitch_deg"] = float(np.degrees(np.arctan2(r[2, 1], r[2, 2])))
-        face["roll_deg"] = float(np.degrees(np.arctan2(r[1, 0], r[0, 0])))
-    return face
+    side = float(np.clip(side, 12, max(w, h)))
+    x0, y0 = int(nose[0] - side), int(nose[1] - side * 1.15)   # a little above the nose: hair
+    return ((max(0, x0), max(0, y0), min(w, x0 + int(2 * side)), min(h, y0 + int(2 * side))), roll)
 
 
+@muted  # MediaPipe's C++ log lines
+def detect_face(img: Image.Image, pose: dict | None = None) -> dict | None:
+    """478-point face mesh, a jaw-bounded face mask, and a rough head turn.
+
+    Whole photo first, then a pose-guided crop of the head at a few sizes, then with the
+    detector's confidence floor removed. A tilted or distant face is usually found by only one of
+    those, and the mesh is what tells a real face from the neck and chest on a close-up -
+    SegFormer labels both 'face', so without it the whole chest stays protected and is never
+    repainted."""
+    if not FACE_MODEL.exists():
+        return None
+    import cv2
+
+    strict, lenient = _face_landmarker(0.5), _face_landmarker(0.0)
+    w, h = img.size
+
+    def from_landmarks(matrices, pts):
+        oval = np.zeros((h, w), np.uint8)
+        cv2.fillConvexPoly(oval, cv2.convexHull(pts.astype(np.int32)), 255)
+        face = {"points": pts, "oval": oval.astype(bool)}
+        if matrices:
+            r = np.asarray(matrices[0])[:3, :3]
+            face["yaw_deg"] = float(np.degrees(np.arctan2(-r[2, 0], np.hypot(r[2, 1], r[2, 2]))))
+            face["pitch_deg"] = float(np.degrees(np.arctan2(r[2, 1], r[2, 2])))
+            face["roll_deg"] = float(np.degrees(np.arctan2(r[1, 0], r[0, 0])))
+        return face
+
+    for landmarker in (strict, lenient):
+        res = landmarker.detect(mp_image(img))
+        if res.face_landmarks:
+            pts = np.array([[l.x * w, l.y * h] for l in res.face_landmarks[0]], np.float32)
+            return from_landmarks(res.facial_transformation_matrixes, pts)
+
+    box = head_box(img, pose)
+    if box is None:
+        return None
+    (x0, y0, x1, y1), roll = box
+    # The box is sized from the shoulders, which is a guess: shot from behind, or with the arms
+    # forward, the pose joints sit much closer together than the real shoulders and the box comes
+    # out too small for the face to be recognised. Try it larger too - the mesh is the same face.
+    for mult in (1.0, 1.8, 2.6):
+        bw, bh = (x1 - x0) * mult, (y1 - y0) * mult
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        bx = (max(0, int(cx - bw / 2)), max(0, int(cy - bh / 2)),
+              min(w, int(cx + bw / 2)), min(h, int(cy + bh / 2)))
+        if bx[2] - bx[0] < 8 or bx[3] - bx[1] < 8:
+            continue
+        patch = img.crop(bx).resize((512, 512), Image.LANCZOS)
+        if abs(roll) > 8:                    # upright for the detector
+            patch = patch.rotate(-roll, resample=Image.BILINEAR, fillcolor=(128, 128, 128))
+        for landmarker in (strict, lenient):
+            res = landmarker.detect(mp_image(patch))
+            if not res.face_landmarks:
+                continue
+            pts = np.array([[l.x * 512, l.y * 512] for l in res.face_landmarks[0]], np.float32)
+            if abs(roll) > 8:                # undo the de-rotation
+                a = np.radians(roll)
+                c, sn = np.cos(a), np.sin(a)
+                pts = (pts - 256.0) @ np.array([[c, sn], [-sn, c]]) + 256.0
+            bw2, bh2 = bx[2] - bx[0], bx[3] - bx[1]
+            pts = pts * [bw2 / 512, bh2 / 512] + [bx[0], bx[1]]
+            return from_landmarks(res.facial_transformation_matrixes, pts)
+    return None
+
+
+@muted  # MediaPipe's C++ log lines
 def detect_hands(img: Image.Image) -> list[np.ndarray]:
     """21 MediaPipe landmarks per detected hand, in pixels."""
     if not HAND_MODEL.exists():
@@ -130,6 +213,7 @@ def detect_hands(img: Image.Image) -> list[np.ndarray]:
     return [np.array([[l.x * w, l.y * h] for l in hand], np.float32) for hand in res.hand_landmarks]
 
 
+@muted  # MediaPipe's C++ log lines
 def detect_pose(img: Image.Image) -> dict | None:
     """33 body joints (pixels + visibility) and MediaPipe's person silhouette."""
     if not POSE_MODEL.exists():
@@ -157,7 +241,9 @@ def detect_pose(img: Image.Image) -> dict | None:
 def estimate_depth(img: Image.Image, device: str) -> Image.Image:
     from transformers import pipeline
 
-    est = pipeline("depth-estimation", model=DEPTH_MODEL, device=0 if device == "cuda" else -1)
+    import model_cache
+    est = model_cache.get(("depth", device), lambda: pipeline(
+        "depth-estimation", model=DEPTH_MODEL, device=0 if device == "cuda" else -1))
     depth = est(img)["depth"].convert("L").resize(img.size)
     del est
     if device == "cuda":
@@ -335,8 +421,8 @@ def precise_labels(orig: Image.Image, device: str, parser: str = "segformer", ma
 
     img = fit_image(orig, max_side)
     scale = orig.size[0] / img.size[0]
-    face = detect_face(img)
     pose = detect_pose(img)
+    face = detect_face(img, pose)          # pose tells it where to aim if the whole photo fails
     hand_lms = [lm * scale for lm in detect_hands(img)]
     if face is not None:
         face["points"] = face["points"] * scale
@@ -375,6 +461,8 @@ def main() -> None:
     ap.add_argument("image", type=Path)
     ap.add_argument("--out", type=Path, default=None, help="default: outputs/analysis/<image name>")
     ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    ap.add_argument("--gpu-max-used", type=float, default=0.8,
+                    help="--device auto falls back to the CPU when this fraction of GPU memory is in use")
     ap.add_argument("--threads", type=int, default=4, help="CPU threads for torch (keeps the machine responsive)")
     ap.add_argument("--max-side", type=int, default=1024, help="working resolution (longest side)")
     ap.add_argument("--no-depth", action="store_true", help="skip the depth map")
@@ -385,8 +473,7 @@ def main() -> None:
                     help="skip SAM refinement: SegFormer masks at working resolution (blocky edges)")
     args = ap.parse_args()
 
-    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else \
-        ("cpu" if args.device == "auto" else args.device)
+    device = pick_device(args.device, args.gpu_max_used)
     torch.set_num_threads(max(1, args.threads))
     out_dir = args.out or ROOT / "outputs" / "analysis" / args.image.stem
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
@@ -403,8 +490,8 @@ def main() -> None:
     scores = {"segformer_512_upscaled": edge_alignment(coarse_full, gray_full)}
 
     if args.fast:
-        face = detect_face(img)
         pose = detect_pose(img)
+        face = detect_face(img, pose)
         if args.parser == "sapiens":
             labels = sapiens_probs(img, device)[0].argmax(0).astype(np.uint8)
         else:
