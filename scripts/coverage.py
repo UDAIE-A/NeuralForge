@@ -457,14 +457,25 @@ def _assign_regions(b: BodyMap, labels: np.ndarray, person: np.ndarray, cloth: n
         y1 = int(y_sh + torso * y1f)
         return put(name, band_mask(y0f, y1f, ax0, ax1), y0, y1)
 
+    def put_band(name, y0f, y1f, ax0=cx0, ax1=cx1):
+        # No pose means no shoulders and no hips to measure between, so a band placed at a fraction
+        # of that span would be anchored to the bounding box instead - which invented a hip and a
+        # midriff on a tight head-and-shoulders crop, and `plan()` then protected a waist that was
+        # never in shot. Only cloth-derived regions survive without a pose, because a gap between
+        # two garments is a fact about the cloth rather than about the anatomy.
+        if b.source != "pose":
+            return False
+        y0 = int(y_sh + torso * y0f)
+        y1 = int(y_sh + torso * y1f)
+        return put(name, band_mask(y0f, y1f, ax0, ax1), y0, y1)
+
     put_band("neck", 0.0, 0.16)
     put_band("shoulder", 0.0, 0.16)
 
-    # chest and back are the same pixels in one photo, so both are reported. `facing` only decides
-    # which of the two a backless prompt should treat as the bare side.
-    ch_y0, ch_y1 = int(y_sh + torso * 0.10), int(y_sh + torso * 0.36)
-    for name in ("chest", "back"):
-        put(name, band_mask(0.10, 0.36), ch_y0, ch_y1)
+    # chest and back are the same pixels in one photo, so both are reported. `facing` only
+    # decides which of the two a backless prompt should treat as the bare side.
+    put_band("chest", 0.10, 0.36)
+    put_band("back", 0.10, 0.36)
 
     # the midriff: the gap between the upper and lower pieces where there is one, otherwise the
     # band that a one-piece garment covers
@@ -472,10 +483,15 @@ def _assign_regions(b: BodyMap, labels: np.ndarray, person: np.ndarray, cloth: n
     y_end = min(H - 1, y_hip + int(torso * 0.55))
     gap, gap_cols = _waist_gap(body, labels, upper_only, lower_only, y_sh, y_end, cx0, cx1, min_gap)
     how = "waist gap"
-    if not (gap_cols > 0.15 and gap.any()):
+    if not (gap_cols > 0.15 and gap.any()) and b.source == "pose":
         # No seam between the garment pieces. Either the middle is covered - a one-piece dress - or
         # the skin shows through a cut-out, which is a real bare midriff (photo_0104). Ask the
         # refinement's own exposed-skin label which of the two this is.
+        #
+        # Only with a pose. Deciding whether a bare patch is a midriff or a chest is a question about
+        # where the patch sits on the body, and without shoulders and hips to measure against the
+        # bounding box is no answer at all: on a tight head-and-shoulders crop it read the whole
+        # decolletage as a midriff and went on to protect it.
         blob, blob_top = _skin_blob(skin & core, y_sh + int(torso * 0.28),
                                     int(0.0015 * H * W))
         if blob.any():
